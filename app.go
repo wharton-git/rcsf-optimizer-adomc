@@ -456,3 +456,15 @@ func (a *App) UpdateCatalog(newCatalog []Sensor) {
 func (a *App) GetCatalog() []Sensor {
 	return SensorCatalog
 }
+
+func (a *App) GetAllSolutions() []Individual {
+	return a.points
+}
+
+func (a *App) computeScore(ind Individual) float64 {
+	if ind.TotalCost <= 0 {
+		return 0
+	}
+
+	return ind.Fitness / (ind.TotalCost + 1)
+}

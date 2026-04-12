@@ -6,6 +6,8 @@ export function CalculateFitness(arg1:main.Individual):Promise<void>;
 
 export function Evolve():Promise<Array<main.Individual>>;
 
+export function GetAllSolutions():Promise<Array<main.Individual>>;
+
 export function GetCatalog():Promise<Array<main.Sensor>>;
 
 export function GetOptimalSolutions(arg1:number):Promise<Array<main.Individual>>;

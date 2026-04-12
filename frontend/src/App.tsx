@@ -255,17 +255,32 @@ function App() {
                                         {optimalSolutions.map((ind, i) => {
                                             const counts = getSensorDetails(ind.sensors);
 
+                                            const isSelected = selectedIndividual === ind;
+
                                             return (
-                                                <tr key={i} className="hover:bg-emerald-500/10">
+                                                <tr
+                                                    key={i}
+                                                    onClick={() => setSelectedIndividual(ind)}
+                                                    className={`
+                                                                    cursor-pointer transition-colors
+                                                                    hover:bg-emerald-500/10
+                                                                    ${isSelected ? 'bg-emerald-500/10 text-emerald-400' : ''}
+                                                                `}
+                                                >
                                                     <td className="p-2 text-emerald-400 font-bold">
                                                         {ind.fitness.toFixed(1)}%
                                                     </td>
+
                                                     <td className="p-2">
                                                         {ind.totalCost.toLocaleString()} Ar
                                                     </td>
+
                                                     <td className="p-2 text-right">
                                                         {Object.entries(counts).map(([t, c]) => (
-                                                            <span key={t} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                            <span
+                                                                key={t}
+                                                                className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
+                                                            >
                                                                 {c}{t[0]}
                                                             </span>
                                                         ))}

@@ -10,6 +10,10 @@ export function Evolve() {
   return window['go']['main']['App']['Evolve']();
 }
 
+export function GetAllSolutions() {
+  return window['go']['main']['App']['GetAllSolutions']();
+}
+
 export function GetCatalog() {
   return window['go']['main']['App']['GetCatalog']();
 }
