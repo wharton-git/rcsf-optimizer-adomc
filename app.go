@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand"
 	"sort"
@@ -73,6 +74,7 @@ func (a *App) InitPopulation() {
 
 	for i := 0; i < a.config.Population; i++ {
 		numSensors := rand.Intn(10) + 1
+
 		sensors := make([]Sensor, numSensors)
 		velocities := make([]Velocity, numSensors)
 
@@ -98,7 +100,6 @@ func (a *App) InitPopulation() {
 			Sensors:  sensors,
 			Velocity: velocities,
 			PBest:    append([]Sensor{}, sensors...),
-			BestFit:  0,
 		}
 
 		a.CalculateFitness(&ind)
@@ -117,7 +118,7 @@ func (a *App) Evolve() []Individual {
 
 	gBest := a.getBestFitnessIndividual()
 
-	//  PSO
+	// 🔹 PSO
 	for i := range a.points {
 		a.UpdatePositions(&a.points[i], gBest.Sensors)
 		a.CalculateFitness(&a.points[i])
@@ -128,7 +129,7 @@ func (a *App) Evolve() []Individual {
 		}
 	}
 
-	//  GA
+	// 🔹 GA
 	a.applyGeneticOperators()
 
 	a.UpdateParetoFront()
@@ -168,6 +169,7 @@ func (a *App) UpdatePositions(ind *Individual, gBest []Sensor) {
 
 func (a *App) CalculateFitness(ind *Individual) {
 	ind.TotalCost = 0
+
 	for _, s := range ind.Sensors {
 		ind.TotalCost += s.Cost
 	}
@@ -181,11 +183,7 @@ func (a *App) CalculateFitness(ind *Individual) {
 }
 
 func (a *App) computeCoverage(sensors []Sensor) float64 {
-	area := a.config.AreaWidth * a.config.AreaHeight
 	step := 2.0
-	if area > 10000 {
-		step = math.Sqrt(area / 5000)
-	}
 
 	covered := 0
 	total := 0
@@ -193,6 +191,7 @@ func (a *App) computeCoverage(sensors []Sensor) float64 {
 	for x := 0.0; x < a.config.AreaWidth; x += step {
 		for y := 0.0; y < a.config.AreaHeight; y += step {
 			total++
+
 			for _, s := range sensors {
 				dx := x - s.X
 				dy := y - s.Y
@@ -207,22 +206,25 @@ func (a *App) computeCoverage(sensors []Sensor) float64 {
 	if total == 0 {
 		return 0
 	}
+
 	return float64(covered) / float64(total) * 100
 }
 
 func (a *App) tournamentSelect(k int) Individual {
 	best := a.points[rand.Intn(len(a.points))]
+
 	for i := 0; i < k; i++ {
-		challenger := a.points[rand.Intn(len(a.points))]
-		if challenger.Fitness > best.Fitness {
-			best = challenger
+		c := a.points[rand.Intn(len(a.points))]
+		if c.Fitness > best.Fitness {
+			best = c
 		}
 	}
+
 	return best
 }
 
 func crossover(p1, p2 Individual) Individual {
-	childSensors := []Sensor{}
+	child := []Sensor{}
 
 	maxLen := len(p1.Sensors)
 	if len(p2.Sensors) > maxLen {
@@ -232,62 +234,51 @@ func crossover(p1, p2 Individual) Individual {
 	for i := 0; i < maxLen; i++ {
 		if rand.Float64() < 0.5 {
 			if i < len(p1.Sensors) {
-				childSensors = append(childSensors, p1.Sensors[i])
+				child = append(child, p1.Sensors[i])
 			}
 		} else {
 			if i < len(p2.Sensors) {
-				childSensors = append(childSensors, p2.Sensors[i])
+				child = append(child, p2.Sensors[i])
 			}
 		}
 	}
 
-	return Individual{
-		Sensors: childSensors,
-	}
+	return Individual{Sensors: child}
 }
 
 func mutate(ind *Individual) {
 	for i := range ind.Sensors {
 
-		//  déplacement plus fort
 		if rand.Float64() < 0.2 {
 			ind.Sensors[i].X += rand.Float64()*20 - 10
 			ind.Sensors[i].Y += rand.Float64()*20 - 10
 		}
 
-		//  changement de type
 		if rand.Float64() < 0.1 {
-			template := SensorCatalog[rand.Intn(len(SensorCatalog))]
-			ind.Sensors[i].Range = template.Range
-			ind.Sensors[i].Cost = template.Cost
-			ind.Sensors[i].Type = template.Type
+			t := SensorCatalog[rand.Intn(len(SensorCatalog))]
+			ind.Sensors[i].Range = t.Range
+			ind.Sensors[i].Cost = t.Cost
+			ind.Sensors[i].Type = t.Type
 		}
 	}
 
-	//  ajout de capteur (clé pour éviter stagnation)
 	if rand.Float64() < 0.1 && len(ind.Sensors) < 50 {
-		template := SensorCatalog[rand.Intn(len(SensorCatalog))]
+		t := SensorCatalog[rand.Intn(len(SensorCatalog))]
 		ind.Sensors = append(ind.Sensors, Sensor{
 			ID:    len(ind.Sensors),
 			X:     rand.Float64() * 100,
 			Y:     rand.Float64() * 100,
-			Range: template.Range,
-			Cost:  template.Cost,
-			Type:  template.Type,
+			Range: t.Range,
+			Cost:  t.Cost,
+			Type:  t.Type,
 		})
-	}
-
-	//  suppression aléatoire (équilibre)
-	if rand.Float64() < 0.05 && len(ind.Sensors) > 1 {
-		idx := rand.Intn(len(ind.Sensors))
-		ind.Sensors = append(ind.Sensors[:idx], ind.Sensors[idx+1:]...)
 	}
 }
 
 func (a *App) applyGeneticOperators() {
 	newPop := []Individual{}
 
-	//  ÉLITISME (garder les meilleurs)
+	//  ELITISM
 	sort.Slice(a.points, func(i, j int) bool {
 		return a.points[i].Fitness > a.points[j].Fitness
 	})
@@ -299,7 +290,7 @@ func (a *App) applyGeneticOperators() {
 
 	newPop = append(newPop, a.points[:eliteSize]...)
 
-	//  Reproduction
+	//  REPRODUCTION
 	for len(newPop) < len(a.points) {
 		p1 := a.tournamentSelect(3)
 		p2 := a.tournamentSelect(3)
@@ -307,7 +298,6 @@ func (a *App) applyGeneticOperators() {
 		child := crossover(p1, p2)
 		mutate(&child)
 
-		//  IMPORTANT : réinitialiser PSO pour l’enfant
 		child.Velocity = make([]Velocity, len(child.Sensors))
 		for i := range child.Velocity {
 			child.Velocity[i] = Velocity{
@@ -317,7 +307,6 @@ func (a *App) applyGeneticOperators() {
 		}
 
 		child.PBest = append([]Sensor{}, child.Sensors...)
-		child.BestFit = 0
 
 		a.CalculateFitness(&child)
 		child.BestFit = child.Fitness
@@ -333,14 +322,18 @@ func (a *App) UpdateParetoFront() {
 		a.points[i].IsPareto = true
 	}
 
-	for i := 0; i < len(a.points); i++ {
+	for i := range a.points {
 		if a.points[i].Fitness == 0 {
 			a.points[i].IsPareto = false
 			continue
 		}
 
-		for j := 0; j < len(a.points); j++ {
-			if i == j || a.points[j].Fitness == 0 {
+		for j := range a.points {
+			if i == j {
+				continue
+			}
+
+			if a.points[j].Fitness == 0 {
 				continue
 			}
 
@@ -350,6 +343,41 @@ func (a *App) UpdateParetoFront() {
 			}
 		}
 	}
+
+	//  SUPPRESSION DES DOUBLONS
+	seen := map[string]bool{}
+
+	for i := range a.points {
+		if !a.points[i].IsPareto {
+			continue
+		}
+
+		sig := getSignature(a.points[i])
+
+		if seen[sig] {
+			a.points[i].IsPareto = false
+		} else {
+			seen[sig] = true
+		}
+	}
+}
+
+func getSignature(ind Individual) string {
+	counts := map[string]int{}
+
+	for _, s := range ind.Sensors {
+		counts[s.Type]++
+	}
+
+	sig := ""
+
+	for k, v := range counts {
+		sig += k + fmt.Sprintf(":%d|", v)
+	}
+
+	sig += fmt.Sprintf("C%.0f_F%.1f", ind.TotalCost, ind.Fitness)
+
+	return sig
 }
 
 func (a *App) dominates(a1, a2 Individual) bool {
@@ -359,11 +387,13 @@ func (a *App) dominates(a1, a2 Individual) bool {
 
 func (a *App) getBestFitnessIndividual() Individual {
 	best := a.points[0]
+
 	for _, ind := range a.points {
 		if ind.Fitness > best.Fitness {
 			best = ind
 		}
 	}
+
 	return best
 }
 
