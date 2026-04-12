@@ -1,4 +1,15 @@
-import { ScatterChart, Scatter, XAxis, YAxis, ZAxis, Tooltip, ResponsiveContainer, Line, ComposedChart, Cell } from 'recharts';
+import {
+    ScatterChart,
+    Scatter,
+    XAxis,
+    YAxis,
+    ZAxis,
+    Tooltip,
+    ResponsiveContainer,
+    Line,
+    ComposedChart,
+    Cell,
+} from 'recharts';
 import { main } from "../../wailsjs/go/models";
 
 interface Props {
@@ -6,91 +17,138 @@ interface Props {
 }
 
 export default function ParetoChart({ population }: Props) {
-    // 1. Filtrer pour ne garder que les solutions valides (Fitness > 0)
-    // Cela évite d'écraser l'échelle du graph avec les individus rejetés
+
+    //  Filtrer solutions valides
     const validData = population
         .filter(ind => ind.fitness > 0)
         .map((ind, index) => ({
             x: ind.totalCost,
             y: ind.fitness,
             isPareto: ind.isPareto,
-            id: index
+            sensors: ind.sensors.length,
+            id: index,
         }));
 
-    // 2. Extraire et trier le front de Pareto pour la ligne bleue
+    //  Pareto front trié
     const paretoLine = validData
         .filter(p => p.isPareto)
         .sort((a, b) => a.x - b.x);
 
-    // Formateur pour le coût (ex: 1 500 000 Ar)
-    const formatCost = (value: number) => {
-        return `${value.toLocaleString()} Ar`;
+    //  KNEE POINT (meilleur compromis)
+    const kneePoint = paretoLine.reduce((best, point) => {
+        const score = point.y / (point.x + 1); // ratio efficacité/coût
+        const bestScore = best ? best.y / (best.x + 1) : -1;
+        return score > bestScore ? point : best;
+    }, null as any);
+
+    //  DENSITÉ LOCALE (simple clustering)
+    const computeDensity = (p: any) => {
+        let count = 0;
+        for (const q of validData) {
+            const dx = p.x - q.x;
+            const dy = p.y - q.y;
+            if (Math.sqrt(dx * dx + dy * dy) < 200000) {
+                count++;
+            }
+        }
+        return count;
     };
 
+    const enrichedData = validData.map(p => ({
+        ...p,
+        density: computeDensity(p),
+    }));
+
+    const maxDensity = Math.max(...enrichedData.map(p => p.density));
+
+    const formatCost = (v: number) => `${v.toLocaleString()} Ar`;
+
     return (
-        <div className="h-64 w-full bg-slate-900/50 p-2 rounded-xl border border-slate-800">
+        <div className="h-72 w-full bg-slate-900/50 p-2 rounded-xl border border-slate-800">
             <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart margin={{ top: 10, right: 10, bottom: 10, left: -10 }}>
+
+                    {/* AXES */}
                     <XAxis
                         dataKey="x"
-                        name="Coût"
                         type="number"
-                        stroke="#475569"
-                        fontSize={9}
-                        tickLine={false}
-                        tickFormatter={(val) => `${val / 1000}k`} // Affiche en "k" pour gagner de la place
+                        stroke="#64748b"
+                        tickFormatter={(v) => `${Math.round(v / 1000)}k`}
+                        fontSize={10}
                     />
                     <YAxis
                         dataKey="y"
-                        name="Couverture"
-                        unit="%"
                         type="number"
                         domain={[0, 100]}
-                        stroke="#475569"
+                        stroke="#64748b"
                         fontSize={10}
-                        tickLine={false}
                     />
-                    <ZAxis range={[20, 21]} />
+
+                    <ZAxis range={[40, 40]} />
+
+                    {/* TOOLTIP AVANCÉ */}
                     <Tooltip
-                        cursor={{ strokeDasharray: '3 3' }}
-                        contentStyle={{ backgroundColor: '#0f172a', border: '1px solid #1e293b', fontSize: '11px', borderRadius: '8px' }}
-                        formatter={(value: any, name: any) => {
-                            if (typeof value === 'number') {
-                                if (name === "x") {
-                                    return [formatCost(value), "Coût"];
-                                }
-                                if (name === "y") {
-                                    return [`${value.toFixed(2)}%`, "Couverture"];
-                                }
-                            }
+                        contentStyle={{
+                            backgroundColor: '#0f172a',
+                            border: '1px solid #1e293b',
+                            borderRadius: 8,
+                            fontSize: 11,
+                        }}
+                        formatter={(value: any, name: any, props: any) => {
+                            if (name === "x") return [formatCost(value), "Coût"];
+                            if (name === "y") return [`${value.toFixed(2)}%`, "Couverture"];
+                            if (name === "sensors") return [value, "Capteurs"];
                             return [value, name];
                         }}
                     />
 
-                    {/* Population Globale : Points grisés pour les solutions dominées */}
-                    <Scatter name="Solutions" data={validData}>
-                        {validData.map((entry, index) => (
-                            <Cell
-                                key={`cell-${index}`}
-                                fill={entry.isPareto ? '#10b981' : '#475569'} // Vert pour Pareto, gris pour le reste
-                                fillOpacity={entry.isPareto ? 1 : 0.3}
-                            />
-                        ))}
+                    {/*  SCATTER AVEC DENSITÉ VISUELLE */}
+                    <Scatter name="Solutions" data={enrichedData}>
+                        {enrichedData.map((entry, index) => {
+                            const intensity = entry.density / maxDensity;
+
+                            // gradient vert → rouge selon densité
+                            const color = entry.isPareto
+                                ? `rgba(16,185,129,${0.3 + intensity * 0.7})`
+                                : `rgba(100,116,139,0.25)`;
+
+                            return (
+                                <Cell
+                                    key={`cell-${index}`}
+                                    fill={color}
+                                />
+                            );
+                        })}
                     </Scatter>
 
-                    {/* Ligne du Front de Pareto : La frontière de l'optimalité */}
+                    {/*  FRONT PARETO LISSE */}
                     <Line
-                        type="monotone" // "stepAfter" est souvent plus réaliste pour du Pareto discret
+                        type="monotone"
                         data={paretoLine}
                         dataKey="y"
                         stroke="#10b981"
                         strokeWidth={2}
                         dot={false}
-                        activeDot={false}
                         isAnimationActive={false}
                     />
+
+                    {/*  KNEE POINT (meilleur compromis) */}
+                    {kneePoint && (
+                        <Scatter
+                            data={[kneePoint]}
+                            fill="#f59e0b"
+                        />
+                    )}
+
                 </ComposedChart>
             </ResponsiveContainer>
+
+            {/*  LÉGENDE */}
+            <div className="flex justify-between text-[10px] text-slate-400 mt-1 px-2">
+                <span>🟢 Pareto optimal</span>
+                <span>🟡 Meilleur compromis</span>
+                <span>🔵 Densité des solutions</span>
+            </div>
         </div>
     );
 }
