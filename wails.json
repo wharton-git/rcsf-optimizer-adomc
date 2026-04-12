@@ -1,0 +1,13 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "rcsf-optimizer",
+  "outputfilename": "rcsf-optimizer",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "Xeon@Sanctuary",
+    "email": "whartonaldrick@gmail.com"
+  }
+}
