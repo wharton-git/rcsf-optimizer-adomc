@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Evolve, InitPopulation, SetConstraints, GetCatalog, UpdateCatalog, GetOptimalSolutions } from "../wailsjs/go/main/App";
+import { Evolve, InitPopulation, SetConstraints, GetCatalog, UpdateCatalog, GetOptimalSolutions, GetAllSolutions } from "../wailsjs/go/main/App";
 import ParetoChart from './components/ParetoChart';
 import { main } from "../wailsjs/go/models";
 
@@ -15,6 +15,7 @@ function App() {
     const [catalog, setCatalog] = useState<main.Sensor[]>([]);
     const [selectedIndividual, setSelectedIndividual] = useState<main.Individual | null>(null);
     const [optimalSolutions, setOptimalSolutions] = useState<main.Individual[]>([]);
+    const [allSolutions, setAllSolutions] = useState<main.Individual[]>([]);
     const [config, setConfig] = useState({
         areaWidth: 80,
         areaHeight: 60,
@@ -54,6 +55,17 @@ function App() {
 
         if (population.length > 0) {
             load();
+        }
+    }, [population]);
+
+    useEffect(() => {
+        const loadAll = async () => {
+            const res = await GetAllSolutions();
+            setAllSolutions(res);
+        };
+
+        if (population.length > 0) {
+            loadAll();
         }
     }, [population]);
 
@@ -130,6 +142,33 @@ function App() {
         sensors.forEach(s => counts[s.type] = (counts[s.type] || 0) + 1);
         return counts;
     };
+
+    const paretoSolutions = population
+        .filter(p => p.isPareto && p.fitness > 0)
+        .sort((a, b) => {
+            const sa = a.fitness / (a.totalCost + 1);
+            const sb = b.fitness / (b.totalCost + 1);
+            return sb - sa;
+        })
+        .slice(0, 10);
+
+    const bestCompromises = population
+        .filter(p => p.fitness > 0)
+        .sort((a, b) => {
+            const sa = a.fitness / (a.totalCost + 1);
+            const sb = b.fitness / (b.totalCost + 1);
+            return sb - sa;
+        })
+        .slice(0, 10);
+
+    const globalRanking = allSolutions
+        .filter(p => p.fitness > 0)
+        .map(p => ({
+            individual: p,
+            score: p.fitness / (p.totalCost + 1)
+        }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 20);
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-200 overflow-hidden font-sans">
@@ -218,27 +257,24 @@ function App() {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-800/40 font-mono">
-                                        {population
-                                            .filter(p => p.isPareto && p.fitness > 0)
-                                            .sort((a, b) => b.fitness - a.fitness)
-                                            .slice(0, 10)
-                                            .map((ind, idx) => {
-                                                const counts = getSensorDetails(ind.sensors);
-                                                return (
-                                                    <tr key={idx} onClick={() => setSelectedIndividual(ind)}
-                                                        className={`cursor-pointer transition-colors text-[10px] hover:bg-slate-800 ${selectedIndividual === ind ? 'bg-emerald-500/10 text-emerald-400' : ''}`}>
-                                                        <td className="p-3 font-bold">{ind.fitness.toFixed(1)}%</td>
-                                                        <td className="p-3">{ind.totalCost.toLocaleString()}</td>
-                                                        <td className="p-3 flex justify-end gap-1">
-                                                            {Object.entries(counts).map(([type, count]) => (
-                                                                <span key={type} className="bg-slate-900 px-1 rounded text-[8px] border border-slate-800" title={type}>
-                                                                    {count}{type[0]}
-                                                                </span>
-                                                            ))}
-                                                        </td>
-                                                    </tr>
-                                                );
-                                            })}
+                                        {paretoSolutions.map((ind, idx) => {
+                                            const counts = getSensorDetails(ind.sensors);
+
+                                            return (
+                                                <tr
+                                                    key={idx}
+                                                    onClick={() => setSelectedIndividual(ind)}
+                                                    className={`cursor-pointer transition-colors text-[10px] hover:bg-slate-800 ${selectedIndividual === ind ? 'bg-emerald-500/10 text-emerald-400' : ''
+                                                        }`}
+                                                >
+                                                    <td className="p-3 font-bold">{ind.fitness.toFixed(1)}%</td>
+                                                    <td className="p-3">{ind.totalCost.toLocaleString()}</td>
+                                                    <td className="p-3 text-right">
+                                                        {(ind.fitness / (ind.totalCost + 1)).toExponential(2)}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
                                     </tbody>
                                 </table>
                             </div>
@@ -284,6 +320,76 @@ function App() {
                                                                 {c}{t[0]}
                                                             </span>
                                                         ))}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div className="mt-6">
+                            <h3 className="text-[10px] font-bold text-yellow-400 uppercase mb-2">
+                                Meilleurs Compromis
+                            </h3>
+
+                            <div className="bg-slate-950/50 border border-yellow-500/20 rounded-xl overflow-hidden">
+                                <table className="w-full text-[10px] font-mono">
+                                    <tbody>
+                                        {bestCompromises.map((ind, i) => {
+                                            const counts = getSensorDetails(ind.sensors);
+                                            const isSelected = selectedIndividual === ind;
+
+                                            return (
+                                                <tr
+                                                    key={i}
+                                                    onClick={() => setSelectedIndividual(ind)}
+                                                    className={`cursor-pointer hover:bg-yellow-500/10 ${isSelected ? 'bg-yellow-500/10 text-yellow-300' : ''
+                                                        }`}
+                                                >
+                                                    <td className="p-2 text-yellow-400 font-bold">
+                                                        {ind.fitness.toFixed(1)}%
+                                                    </td>
+
+                                                    <td className="p-2">
+                                                        {ind.totalCost.toLocaleString()} Ar
+                                                    </td>
+
+                                                    <td className="p-2 text-right">
+                                                        {(ind.fitness / (ind.totalCost + 1)).toExponential(2)}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div className="mt-6">
+                            <h3 className="text-[10px] font-bold text-blue-400 uppercase mb-2">
+                                Ranking Global (Score Multi-Objectif)
+                            </h3>
+
+                            <div className="bg-slate-950/50 border border-blue-500/20 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
+                                <table className="w-full text-[10px] font-mono">
+                                    <tbody>
+                                        {globalRanking.map(({ individual: ind, score }, i) => {
+                                            const isSelected = selectedIndividual === ind;
+
+                                            return (
+                                                <tr
+                                                    key={i}
+                                                    onClick={() => setSelectedIndividual(ind)}
+                                                    className={`cursor-pointer hover:bg-blue-500/10 ${isSelected ? 'bg-blue-500/10 text-blue-300' : ''
+                                                        }`}
+                                                >
+                                                    <td className="p-2 text-blue-400">#{i + 1}</td>
+                                                    <td className="p-2">{ind.fitness.toFixed(1)}%</td>
+                                                    <td className="p-2">{ind.totalCost.toLocaleString()} Ar</td>
+                                                    <td className="p-2 text-right text-emerald-400">
+                                                        {score.toExponential(2)}
                                                     </td>
                                                 </tr>
                                             );
