@@ -9,6 +9,12 @@ const SENSOR_COLORS: Record<string, { bg: string, stroke: string, dot: string }>
     "Premium-C": { bg: 'rgba(168, 85, 247, 0.15)', stroke: 'rgba(168, 85, 247, 0.4)', dot: '#a855f7' },
 };
 
+const formatMaterial = (sensors: main.Sensor[]) => {
+    const counts: Record<string, number> = {};
+    sensors.forEach(s => counts[s.type] = (counts[s.type] || 0) + 1);
+    return counts;
+};
+
 function App() {
     const [population, setPopulation] = useState<main.Individual[]>([]);
     const [isRunning, setIsRunning] = useState(false);
@@ -170,6 +176,7 @@ function App() {
         .sort((a, b) => b.score - a.score)
         .slice(0, 20);
 
+
     return (
         <div className="flex h-screen bg-slate-950 text-slate-200 overflow-hidden font-sans">
             <aside className="bg-slate-900 w-max min-w-max border-r border-slate-800 p-5 flex flex-col gap-6 overflow-y-auto shadow-2xl z-10 custom-scrollbar">
@@ -269,8 +276,15 @@ function App() {
                                                 >
                                                     <td className="p-3 font-bold">{ind.fitness.toFixed(1)}%</td>
                                                     <td className="p-3">{ind.totalCost.toLocaleString()}</td>
-                                                    <td className="p-3 text-right">
-                                                        {(ind.fitness / (ind.totalCost + 1)).toExponential(2)}
+                                                    <td className="p-3 text-right flex justify-end gap-1">
+                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
+                                                            <span
+                                                                key={t}
+                                                                className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
+                                                            >
+                                                                {c}{t[0]}
+                                                            </span>
+                                                        ))}
                                                     </td>
                                                 </tr>
                                             );
@@ -356,8 +370,12 @@ function App() {
                                                         {ind.totalCost.toLocaleString()} Ar
                                                     </td>
 
-                                                    <td className="p-2 text-right">
-                                                        {(ind.fitness / (ind.totalCost + 1)).toExponential(2)}
+                                                    <td className="p-2 text-right flex justify-end gap-1">
+                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
+                                                            <span className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                                {c}{t[0]}
+                                                            </span>
+                                                        ))}
                                                     </td>
                                                 </tr>
                                             );
@@ -388,8 +406,12 @@ function App() {
                                                     <td className="p-2 text-blue-400">#{i + 1}</td>
                                                     <td className="p-2">{ind.fitness.toFixed(1)}%</td>
                                                     <td className="p-2">{ind.totalCost.toLocaleString()} Ar</td>
-                                                    <td className="p-2 text-right text-emerald-400">
-                                                        {score.toExponential(2)}
+                                                    <td className="p-2 text-right flex justify-end gap-1">
+                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
+                                                            <span className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                                {c}{t[0]}
+                                                            </span>
+                                                        ))}
                                                     </td>
                                                 </tr>
                                             );
