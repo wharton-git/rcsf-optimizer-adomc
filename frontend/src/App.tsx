@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Evolve, InitPopulation, SetConstraints, GetCatalog, UpdateCatalog } from "../wailsjs/go/main/App";
+import { Evolve, InitPopulation, SetConstraints, GetCatalog, UpdateCatalog, GetOptimalSolutions } from "../wailsjs/go/main/App";
 import ParetoChart from './components/ParetoChart';
 import { main } from "../wailsjs/go/models";
 
@@ -14,6 +14,7 @@ function App() {
     const [isRunning, setIsRunning] = useState(false);
     const [catalog, setCatalog] = useState<main.Sensor[]>([]);
     const [selectedIndividual, setSelectedIndividual] = useState<main.Individual | null>(null);
+    const [optimalSolutions, setOptimalSolutions] = useState<main.Individual[]>([]);
     const [config, setConfig] = useState({
         areaWidth: 80,
         areaHeight: 60,
@@ -45,14 +46,22 @@ function App() {
         return () => window.removeEventListener('resize', updateScale);
     }, [config.areaWidth, config.areaHeight]);
 
+    useEffect(() => {
+        const load = async () => {
+            const res = await GetOptimalSolutions(10);
+            setOptimalSolutions(res);
+        };
+
+        if (population.length > 0) {
+            load();
+        }
+    }, [population]);
+
     const handleConfigChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
         const newConfig = { ...config, [name]: Number(value) };
         setConfig(newConfig);
 
-        // CORRECTION : On passe l'objet complet incluant le maxBudget au Go
-
-        // LOG : Voir ce qui part vers le Go
         console.log("Envoi au Backend :", {
             areaWidth: Number(newConfig.areaWidth),
             areaHeight: Number(newConfig.areaHeight),
@@ -234,6 +243,41 @@ function App() {
                                 </table>
                             </div>
                         </div>
+
+                        <div className="mt-6">
+                            <h3 className="text-[10px] font-bold text-emerald-400 uppercase mb-2">
+                                Solutions Optimales Diversifiées
+                            </h3>
+
+                            <div className="bg-slate-950/50 border border-emerald-500/20 rounded-xl overflow-hidden">
+                                <table className="w-full text-[10px] font-mono">
+                                    <tbody>
+                                        {optimalSolutions.map((ind, i) => {
+                                            const counts = getSensorDetails(ind.sensors);
+
+                                            return (
+                                                <tr key={i} className="hover:bg-emerald-500/10">
+                                                    <td className="p-2 text-emerald-400 font-bold">
+                                                        {ind.fitness.toFixed(1)}%
+                                                    </td>
+                                                    <td className="p-2">
+                                                        {ind.totalCost.toLocaleString()} Ar
+                                                    </td>
+                                                    <td className="p-2 text-right">
+                                                        {Object.entries(counts).map(([t, c]) => (
+                                                            <span key={t} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                                {c}{t[0]}
+                                                            </span>
+                                                        ))}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
                     </div>
                 </div>
             </aside>

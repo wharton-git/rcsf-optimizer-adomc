@@ -73,21 +73,22 @@ func (a *App) InitPopulation() {
 	a.points = make([]Individual, a.config.Population)
 
 	for i := 0; i < a.config.Population; i++ {
+
 		numSensors := rand.Intn(10) + 1
 
 		sensors := make([]Sensor, numSensors)
 		velocities := make([]Velocity, numSensors)
 
 		for j := 0; j < numSensors; j++ {
-			template := SensorCatalog[rand.Intn(len(SensorCatalog))]
+			t := SensorCatalog[rand.Intn(len(SensorCatalog))]
 
 			sensors[j] = Sensor{
 				ID:    j,
 				X:     rand.Float64() * a.config.AreaWidth,
 				Y:     rand.Float64() * a.config.AreaHeight,
-				Range: template.Range,
-				Cost:  template.Cost,
-				Type:  template.Type,
+				Range: t.Range,
+				Cost:  t.Cost,
+				Type:  t.Type,
 			}
 
 			velocities[j] = Velocity{
@@ -110,6 +111,32 @@ func (a *App) InitPopulation() {
 	a.UpdateParetoFront()
 }
 
+func (a *App) getBestFitnessIndividual() Individual {
+	if len(a.points) == 0 {
+		return Individual{}
+	}
+
+	var best Individual
+	found := false
+
+	for _, ind := range a.points {
+		if ind.Fitness <= 0 {
+			continue
+		}
+
+		if !found || ind.Fitness > best.Fitness {
+			best = ind
+			found = true
+		}
+	}
+
+	if !found {
+		return a.points[0]
+	}
+
+	return best
+}
+
 func (a *App) Evolve() []Individual {
 	if len(a.points) == 0 {
 		a.InitPopulation()
@@ -118,7 +145,6 @@ func (a *App) Evolve() []Individual {
 
 	gBest := a.getBestFitnessIndividual()
 
-	// 🔹 PSO
 	for i := range a.points {
 		a.UpdatePositions(&a.points[i], gBest.Sensors)
 		a.CalculateFitness(&a.points[i])
@@ -129,10 +155,9 @@ func (a *App) Evolve() []Individual {
 		}
 	}
 
-	// 🔹 GA
 	a.applyGeneticOperators()
-
 	a.UpdateParetoFront()
+
 	return a.points
 }
 
@@ -184,7 +209,6 @@ func (a *App) CalculateFitness(ind *Individual) {
 
 func (a *App) computeCoverage(sensors []Sensor) float64 {
 	step := 2.0
-
 	covered := 0
 	total := 0
 
@@ -210,75 +234,11 @@ func (a *App) computeCoverage(sensors []Sensor) float64 {
 	return float64(covered) / float64(total) * 100
 }
 
-func (a *App) tournamentSelect(k int) Individual {
-	best := a.points[rand.Intn(len(a.points))]
-
-	for i := 0; i < k; i++ {
-		c := a.points[rand.Intn(len(a.points))]
-		if c.Fitness > best.Fitness {
-			best = c
-		}
-	}
-
-	return best
-}
-
-func crossover(p1, p2 Individual) Individual {
-	child := []Sensor{}
-
-	maxLen := len(p1.Sensors)
-	if len(p2.Sensors) > maxLen {
-		maxLen = len(p2.Sensors)
-	}
-
-	for i := 0; i < maxLen; i++ {
-		if rand.Float64() < 0.5 {
-			if i < len(p1.Sensors) {
-				child = append(child, p1.Sensors[i])
-			}
-		} else {
-			if i < len(p2.Sensors) {
-				child = append(child, p2.Sensors[i])
-			}
-		}
-	}
-
-	return Individual{Sensors: child}
-}
-
-func mutate(ind *Individual) {
-	for i := range ind.Sensors {
-
-		if rand.Float64() < 0.2 {
-			ind.Sensors[i].X += rand.Float64()*20 - 10
-			ind.Sensors[i].Y += rand.Float64()*20 - 10
-		}
-
-		if rand.Float64() < 0.1 {
-			t := SensorCatalog[rand.Intn(len(SensorCatalog))]
-			ind.Sensors[i].Range = t.Range
-			ind.Sensors[i].Cost = t.Cost
-			ind.Sensors[i].Type = t.Type
-		}
-	}
-
-	if rand.Float64() < 0.1 && len(ind.Sensors) < 50 {
-		t := SensorCatalog[rand.Intn(len(SensorCatalog))]
-		ind.Sensors = append(ind.Sensors, Sensor{
-			ID:    len(ind.Sensors),
-			X:     rand.Float64() * 100,
-			Y:     rand.Float64() * 100,
-			Range: t.Range,
-			Cost:  t.Cost,
-			Type:  t.Type,
-		})
-	}
-}
+/* ===========================
+   PSO + GA HYBRID
+=========================== */
 
 func (a *App) applyGeneticOperators() {
-	newPop := []Individual{}
-
-	//  ELITISM
 	sort.Slice(a.points, func(i, j int) bool {
 		return a.points[i].Fitness > a.points[j].Fitness
 	})
@@ -288,12 +248,11 @@ func (a *App) applyGeneticOperators() {
 		eliteSize = 1
 	}
 
-	newPop = append(newPop, a.points[:eliteSize]...)
+	newPop := append([]Individual{}, a.points[:eliteSize]...)
 
-	//  REPRODUCTION
 	for len(newPop) < len(a.points) {
-		p1 := a.tournamentSelect(3)
-		p2 := a.tournamentSelect(3)
+		p1 := a.tournamentSelect()
+		p2 := a.tournamentSelect()
 
 		child := crossover(p1, p2)
 		mutate(&child)
@@ -307,7 +266,6 @@ func (a *App) applyGeneticOperators() {
 		}
 
 		child.PBest = append([]Sensor{}, child.Sensors...)
-
 		a.CalculateFitness(&child)
 		child.BestFit = child.Fitness
 
@@ -316,6 +274,55 @@ func (a *App) applyGeneticOperators() {
 
 	a.points = newPop
 }
+
+func (a *App) tournamentSelect() Individual {
+	best := a.points[rand.Intn(len(a.points))]
+
+	for i := 0; i < 3; i++ {
+		c := a.points[rand.Intn(len(a.points))]
+		if c.Fitness > best.Fitness {
+			best = c
+		}
+	}
+
+	return best
+}
+
+func crossover(p1, p2 Individual) Individual {
+	child := Individual{}
+
+	n := max(len(p1.Sensors), len(p2.Sensors))
+
+	for i := 0; i < n; i++ {
+		if rand.Float64() < 0.5 && i < len(p1.Sensors) {
+			child.Sensors = append(child.Sensors, p1.Sensors[i])
+		} else if i < len(p2.Sensors) {
+			child.Sensors = append(child.Sensors, p2.Sensors[i])
+		}
+	}
+
+	return child
+}
+
+func mutate(ind *Individual) {
+	for i := range ind.Sensors {
+		if rand.Float64() < 0.2 {
+			ind.Sensors[i].X += rand.Float64()*20 - 10
+			ind.Sensors[i].Y += rand.Float64()*20 - 10
+		}
+
+		if rand.Float64() < 0.1 {
+			t := SensorCatalog[rand.Intn(len(SensorCatalog))]
+			ind.Sensors[i].Type = t.Type
+			ind.Sensors[i].Range = t.Range
+			ind.Sensors[i].Cost = t.Cost
+		}
+	}
+}
+
+/* ===========================
+   PARETO + DEDUP
+=========================== */
 
 func (a *App) UpdateParetoFront() {
 	for i := range a.points {
@@ -332,19 +339,17 @@ func (a *App) UpdateParetoFront() {
 			if i == j {
 				continue
 			}
-
 			if a.points[j].Fitness == 0 {
 				continue
 			}
 
-			if a.dominates(a.points[j], a.points[i]) {
+			if dominates(a.points[j], a.points[i]) {
 				a.points[i].IsPareto = false
 				break
 			}
 		}
 	}
 
-	//  SUPPRESSION DES DOUBLONS
 	seen := map[string]bool{}
 
 	for i := range a.points {
@@ -353,13 +358,17 @@ func (a *App) UpdateParetoFront() {
 		}
 
 		sig := getSignature(a.points[i])
-
 		if seen[sig] {
 			a.points[i].IsPareto = false
 		} else {
 			seen[sig] = true
 		}
 	}
+}
+
+func dominates(a1, a2 Individual) bool {
+	return (a1.Fitness >= a2.Fitness && a1.TotalCost <= a2.TotalCost) &&
+		(a1.Fitness > a2.Fitness || a1.TotalCost < a2.TotalCost)
 }
 
 func getSignature(ind Individual) string {
@@ -372,29 +381,66 @@ func getSignature(ind Individual) string {
 	sig := ""
 
 	for k, v := range counts {
-		sig += k + fmt.Sprintf(":%d|", v)
+		sig += fmt.Sprintf("%s:%d|", k, v)
 	}
 
-	sig += fmt.Sprintf("C%.0f_F%.1f", ind.TotalCost, ind.Fitness)
+	sig += fmt.Sprintf("C%.0f-F%.1f", ind.TotalCost, ind.Fitness)
 
 	return sig
 }
 
-func (a *App) dominates(a1, a2 Individual) bool {
-	return (a1.Fitness >= a2.Fitness && a1.TotalCost <= a2.TotalCost) &&
-		(a1.Fitness > a2.Fitness || a1.TotalCost < a2.TotalCost)
-}
+/* ===========================
+   OPTIMAL DIVERSIFIED (NEW)
+=========================== */
 
-func (a *App) getBestFitnessIndividual() Individual {
-	best := a.points[0]
+func (a *App) GetOptimalSolutions(limit int) []Individual {
+
+	pareto := []Individual{}
 
 	for _, ind := range a.points {
-		if ind.Fitness > best.Fitness {
-			best = ind
+		if ind.IsPareto && ind.Fitness > 0 {
+			pareto = append(pareto, ind)
 		}
 	}
 
-	return best
+	sort.Slice(pareto, func(i, j int) bool {
+		return pareto[i].Fitness-pareto[i].TotalCost/1e6 >
+			pareto[j].Fitness-pareto[j].TotalCost/1e6
+	})
+
+	selected := []Individual{}
+
+	for _, cand := range pareto {
+		ok := true
+
+		for _, s := range selected {
+			if dist(cand, s) < 50 {
+				ok = false
+				break
+			}
+		}
+
+		if ok {
+			selected = append(selected, cand)
+		}
+
+		if len(selected) >= limit {
+			break
+		}
+	}
+
+	return selected
+}
+
+func dist(a, b Individual) float64 {
+	if len(a.Sensors) == 0 || len(b.Sensors) == 0 {
+		return 999999
+	}
+
+	dx := a.Sensors[0].X - b.Sensors[0].X
+	dy := a.Sensors[0].Y - b.Sensors[0].Y
+
+	return math.Sqrt(dx*dx + dy*dy)
 }
 
 func (a *App) SetConstraints(config Config) {

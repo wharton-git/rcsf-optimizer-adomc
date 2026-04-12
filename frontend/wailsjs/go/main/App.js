@@ -14,6 +14,10 @@ export function GetCatalog() {
   return window['go']['main']['App']['GetCatalog']();
 }
 
+export function GetOptimalSolutions(arg1) {
+  return window['go']['main']['App']['GetOptimalSolutions'](arg1);
+}
+
 export function InitPopulation() {
   return window['go']['main']['App']['InitPopulation']();
 }
