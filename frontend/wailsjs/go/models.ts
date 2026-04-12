@@ -18,6 +18,20 @@ export namespace main {
 	        this.maxBudget = source["maxBudget"];
 	    }
 	}
+	export class Velocity {
+	    VX: number;
+	    VY: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new Velocity(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.VX = source["VX"];
+	        this.VY = source["VY"];
+	    }
+	}
 	export class Sensor {
 	    id: number;
 	    x: number;
@@ -42,6 +56,9 @@ export namespace main {
 	}
 	export class Individual {
 	    sensors: Sensor[];
+	    velocity: Velocity[];
+	    pBest: Sensor[];
+	    bestFit: number;
 	    fitness: number;
 	    totalCost: number;
 	    isPareto: boolean;
@@ -53,6 +70,9 @@ export namespace main {
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.sensors = this.convertValues(source["sensors"], Sensor);
+	        this.velocity = this.convertValues(source["velocity"], Velocity);
+	        this.pBest = this.convertValues(source["pBest"], Sensor);
+	        this.bestFit = source["bestFit"];
 	        this.fitness = source["fitness"];
 	        this.totalCost = source["totalCost"];
 	        this.isPareto = source["isPareto"];
@@ -76,6 +96,7 @@ export namespace main {
 		    return a;
 		}
 	}
+	
 
 }
 

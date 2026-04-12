@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"math/rand"
+	"sort"
 	"time"
 )
-
-const PixelsPerMeter = 10.0
 
 type Sensor struct {
 	ID    int     `json:"id"`
@@ -19,11 +17,20 @@ type Sensor struct {
 	Type  string  `json:"type"`
 }
 
+type Velocity struct {
+	VX float64
+	VY float64
+}
+
 type Individual struct {
-	Sensors   []Sensor `json:"sensors"`
-	Fitness   float64  `json:"fitness"`
-	TotalCost float64  `json:"totalCost"`
-	IsPareto  bool     `json:"isPareto"`
+	Sensors   []Sensor   `json:"sensors"`
+	Velocity  []Velocity `json:"velocity"`
+	PBest     []Sensor   `json:"pBest"`
+	BestFit   float64    `json:"bestFit"`
+
+	Fitness   float64 `json:"fitness"`
+	TotalCost float64 `json:"totalCost"`
+	IsPareto  bool    `json:"isPareto"`
 }
 
 type Config struct {
@@ -65,13 +72,13 @@ func (a *App) InitPopulation() {
 	a.points = make([]Individual, a.config.Population)
 
 	for i := 0; i < a.config.Population; i++ {
-		// CHANGEMENT : On autorise de commencer avec très peu de capteurs (1 à 20)
-		// Cela permet de rester sous les petits budgets dès le départ
-		numSensors := rand.Intn(20) + 1
+		numSensors := rand.Intn(10) + 1
 		sensors := make([]Sensor, numSensors)
+		velocities := make([]Velocity, numSensors)
 
 		for j := 0; j < numSensors; j++ {
 			template := SensorCatalog[rand.Intn(len(SensorCatalog))]
+
 			sensors[j] = Sensor{
 				ID:    j,
 				X:     rand.Float64() * a.config.AreaWidth,
@@ -80,12 +87,25 @@ func (a *App) InitPopulation() {
 				Cost:  template.Cost,
 				Type:  template.Type,
 			}
+
+			velocities[j] = Velocity{
+				VX: rand.Float64()*2 - 1,
+				VY: rand.Float64()*2 - 1,
+			}
 		}
 
-		ind := Individual{Sensors: sensors}
+		ind := Individual{
+			Sensors:  sensors,
+			Velocity: velocities,
+			PBest:    append([]Sensor{}, sensors...),
+			BestFit:  0,
+		}
+
 		a.CalculateFitness(&ind)
+		ind.BestFit = ind.Fitness
 		a.points[i] = ind
 	}
+
 	a.UpdateParetoFront()
 }
 
@@ -96,15 +116,54 @@ func (a *App) Evolve() []Individual {
 	}
 
 	gBest := a.getBestFitnessIndividual()
+
+	//  PSO
 	for i := range a.points {
 		a.UpdatePositions(&a.points[i], gBest.Sensors)
 		a.CalculateFitness(&a.points[i])
+
+		if a.points[i].Fitness > a.points[i].BestFit {
+			a.points[i].BestFit = a.points[i].Fitness
+			a.points[i].PBest = append([]Sensor{}, a.points[i].Sensors...)
+		}
 	}
 
+	//  GA
 	a.applyGeneticOperators()
-	a.UpdateParetoFront()
 
+	a.UpdateParetoFront()
 	return a.points
+}
+
+func (a *App) UpdatePositions(ind *Individual, gBest []Sensor) {
+	w := 0.7
+	c1 := 1.5
+	c2 := 1.5
+
+	for i := range ind.Sensors {
+		if i >= len(gBest) || i >= len(ind.PBest) {
+			break
+		}
+
+		r1 := rand.Float64()
+		r2 := rand.Float64()
+
+		ind.Velocity[i].VX =
+			w*ind.Velocity[i].VX +
+				c1*r1*(ind.PBest[i].X-ind.Sensors[i].X) +
+				c2*r2*(gBest[i].X-ind.Sensors[i].X)
+
+		ind.Velocity[i].VY =
+			w*ind.Velocity[i].VY +
+				c1*r1*(ind.PBest[i].Y-ind.Sensors[i].Y) +
+				c2*r2*(gBest[i].Y-ind.Sensors[i].Y)
+
+		ind.Sensors[i].X += ind.Velocity[i].VX
+		ind.Sensors[i].Y += ind.Velocity[i].VY
+
+		ind.Sensors[i].X = math.Max(0, math.Min(a.config.AreaWidth, ind.Sensors[i].X))
+		ind.Sensors[i].Y = math.Max(0, math.Min(a.config.AreaHeight, ind.Sensors[i].Y))
+	}
 }
 
 func (a *App) CalculateFitness(ind *Individual) {
@@ -113,124 +172,178 @@ func (a *App) CalculateFitness(ind *Individual) {
 		ind.TotalCost += s.Cost
 	}
 
-	// CORRECTION : Validation stricte du budget
-
-	// LOG : Facultatif, décommente seulement si tu veux voir les rejets (attention ça peut flooder)
-	fmt.Printf("Individu rejeté : Coût %.0f > Budget %.0f\n", ind.TotalCost, a.config.MaxBudget)
-
-	if a.config.MaxBudget > 0 && ind.TotalCost > a.config.MaxBudget {
+	if ind.TotalCost > a.config.MaxBudget {
 		ind.Fitness = 0
-	} else {
-		ind.Fitness = a.computeCoverage(ind.Sensors)
+		return
 	}
+
+	ind.Fitness = a.computeCoverage(ind.Sensors)
 }
 
 func (a *App) computeCoverage(sensors []Sensor) float64 {
 	area := a.config.AreaWidth * a.config.AreaHeight
-	step := 1.5
+	step := 2.0
 	if area > 10000 {
 		step = math.Sqrt(area / 5000)
 	}
 
-	coveredPoints := 0
-	totalPoints := 0
+	covered := 0
+	total := 0
 
 	for x := 0.0; x < a.config.AreaWidth; x += step {
 		for y := 0.0; y < a.config.AreaHeight; y += step {
-			totalPoints++
+			total++
 			for _, s := range sensors {
 				dx := x - s.X
 				dy := y - s.Y
-				if (dx*dx + dy*dy) <= (s.Range * s.Range) {
-					coveredPoints++
+				if dx*dx+dy*dy <= s.Range*s.Range {
+					covered++
 					break
 				}
 			}
 		}
 	}
-	if totalPoints == 0 {
+
+	if total == 0 {
 		return 0
 	}
-	return (float64(coveredPoints) / float64(totalPoints)) * 100
+	return float64(covered) / float64(total) * 100
 }
 
-func (a *App) UpdatePositions(ind *Individual, gBestSensors []Sensor) {
-	w := 0.4
-	c2 := 1.2
-	for i := range ind.Sensors {
-		if i >= len(gBestSensors) {
-			break
+func (a *App) tournamentSelect(k int) Individual {
+	best := a.points[rand.Intn(len(a.points))]
+	for i := 0; i < k; i++ {
+		challenger := a.points[rand.Intn(len(a.points))]
+		if challenger.Fitness > best.Fitness {
+			best = challenger
 		}
-		shiftX := c2 * (gBestSensors[i].X - ind.Sensors[i].X)
-		shiftY := c2 * (gBestSensors[i].Y - ind.Sensors[i].Y)
-		ind.Sensors[i].X += shiftX * w
-		ind.Sensors[i].Y += shiftY * w
-		ind.Sensors[i].X = math.Max(0, math.Min(a.config.AreaWidth, ind.Sensors[i].X))
-		ind.Sensors[i].Y = math.Max(0, math.Min(a.config.AreaHeight, ind.Sensors[i].Y))
+	}
+	return best
+}
+
+func crossover(p1, p2 Individual) Individual {
+	childSensors := []Sensor{}
+
+	maxLen := len(p1.Sensors)
+	if len(p2.Sensors) > maxLen {
+		maxLen = len(p2.Sensors)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		if rand.Float64() < 0.5 {
+			if i < len(p1.Sensors) {
+				childSensors = append(childSensors, p1.Sensors[i])
+			}
+		} else {
+			if i < len(p2.Sensors) {
+				childSensors = append(childSensors, p2.Sensors[i])
+			}
+		}
+	}
+
+	return Individual{
+		Sensors: childSensors,
+	}
+}
+
+func mutate(ind *Individual) {
+	for i := range ind.Sensors {
+
+		//  déplacement plus fort
+		if rand.Float64() < 0.2 {
+			ind.Sensors[i].X += rand.Float64()*20 - 10
+			ind.Sensors[i].Y += rand.Float64()*20 - 10
+		}
+
+		//  changement de type
+		if rand.Float64() < 0.1 {
+			template := SensorCatalog[rand.Intn(len(SensorCatalog))]
+			ind.Sensors[i].Range = template.Range
+			ind.Sensors[i].Cost = template.Cost
+			ind.Sensors[i].Type = template.Type
+		}
+	}
+
+	//  ajout de capteur (clé pour éviter stagnation)
+	if rand.Float64() < 0.1 && len(ind.Sensors) < 50 {
+		template := SensorCatalog[rand.Intn(len(SensorCatalog))]
+		ind.Sensors = append(ind.Sensors, Sensor{
+			ID:    len(ind.Sensors),
+			X:     rand.Float64() * 100,
+			Y:     rand.Float64() * 100,
+			Range: template.Range,
+			Cost:  template.Cost,
+			Type:  template.Type,
+		})
+	}
+
+	//  suppression aléatoire (équilibre)
+	if rand.Float64() < 0.05 && len(ind.Sensors) > 1 {
+		idx := rand.Intn(len(ind.Sensors))
+		ind.Sensors = append(ind.Sensors[:idx], ind.Sensors[idx+1:]...)
 	}
 }
 
 func (a *App) applyGeneticOperators() {
-	for i := range a.points {
-		// On n'améliore que les individus qui ne sont pas sur le front de Pareto
-		if !a.points[i].IsPareto && rand.Float64() < 0.3 {
-			r := rand.Float64()
+	newPop := []Individual{}
 
-			// AJOUT DE CAPTEUR : Approche par Grille de Chaleur
-			if r < 0.30 && len(a.points[i].Sensors) < 200 {
-				uncovered := a.findUncoveredPoints(&a.points[i])
+	//  ÉLITISME (garder les meilleurs)
+	sort.Slice(a.points, func(i, j int) bool {
+		return a.points[i].Fitness > a.points[j].Fitness
+	})
 
-				var newX, newY float64
-				if len(uncovered) > 0 {
-					// On choisit un point au hasard PARMI les zones vides
-					target := uncovered[rand.Intn(len(uncovered))]
-					newX, newY = target[0], target[1]
-				} else {
-					// Si tout est déjà couvert, placement aléatoire classique
-					newX = rand.Float64() * a.config.AreaWidth
-					newY = rand.Float64() * a.config.AreaHeight
-				}
-
-				template := SensorCatalog[rand.Intn(len(SensorCatalog))]
-				newSensor := Sensor{
-					ID:    len(a.points[i].Sensors),
-					X:     newX,
-					Y:     newY,
-					Range: template.Range,
-					Cost:  template.Cost,
-					Type:  template.Type,
-				}
-				a.points[i].Sensors = append(a.points[i].Sensors, newSensor)
-			} else if r < 0.40 && len(a.points[i].Sensors) > 1 {
-				// SUPPRESSION : On garde la logique aléatoire
-				idx := rand.Intn(len(a.points[i].Sensors))
-				a.points[i].Sensors = append(a.points[i].Sensors[:idx], a.points[i].Sensors[idx+1:]...)
-			} else if len(a.points[i].Sensors) > 0 {
-				// MUTATION : On garde la logique de changement de type
-				idx := rand.Intn(len(a.points[i].Sensors))
-				template := SensorCatalog[rand.Intn(len(SensorCatalog))]
-				a.points[i].Sensors[idx].Range = template.Range
-				a.points[i].Sensors[idx].Cost = template.Cost
-				a.points[i].Sensors[idx].Type = template.Type
-			}
-			a.CalculateFitness(&a.points[i])
-		}
+	eliteSize := int(0.2 * float64(len(a.points)))
+	if eliteSize < 1 {
+		eliteSize = 1
 	}
+
+	newPop = append(newPop, a.points[:eliteSize]...)
+
+	//  Reproduction
+	for len(newPop) < len(a.points) {
+		p1 := a.tournamentSelect(3)
+		p2 := a.tournamentSelect(3)
+
+		child := crossover(p1, p2)
+		mutate(&child)
+
+		//  IMPORTANT : réinitialiser PSO pour l’enfant
+		child.Velocity = make([]Velocity, len(child.Sensors))
+		for i := range child.Velocity {
+			child.Velocity[i] = Velocity{
+				VX: rand.Float64()*2 - 1,
+				VY: rand.Float64()*2 - 1,
+			}
+		}
+
+		child.PBest = append([]Sensor{}, child.Sensors...)
+		child.BestFit = 0
+
+		a.CalculateFitness(&child)
+		child.BestFit = child.Fitness
+
+		newPop = append(newPop, child)
+	}
+
+	a.points = newPop
 }
 
 func (a *App) UpdateParetoFront() {
 	for i := range a.points {
 		a.points[i].IsPareto = true
 	}
+
 	for i := 0; i < len(a.points); i++ {
 		if a.points[i].Fitness == 0 {
 			a.points[i].IsPareto = false
 			continue
 		}
+
 		for j := 0; j < len(a.points); j++ {
 			if i == j || a.points[j].Fitness == 0 {
 				continue
 			}
+
 			if a.dominates(a.points[j], a.points[i]) {
 				a.points[i].IsPareto = false
 				break
@@ -239,9 +352,9 @@ func (a *App) UpdateParetoFront() {
 	}
 }
 
-func (a *App) dominates(indA, indB Individual) bool {
-	return (indA.Fitness >= indB.Fitness && indA.TotalCost <= indB.TotalCost) &&
-		(indA.Fitness > indB.Fitness || indA.TotalCost < indB.TotalCost)
+func (a *App) dominates(a1, a2 Individual) bool {
+	return (a1.Fitness >= a2.Fitness && a1.TotalCost <= a2.TotalCost) &&
+		(a1.Fitness > a2.Fitness || a1.TotalCost < a2.TotalCost)
 }
 
 func (a *App) getBestFitnessIndividual() Individual {
@@ -255,58 +368,15 @@ func (a *App) getBestFitnessIndividual() Individual {
 }
 
 func (a *App) SetConstraints(config Config) {
-	// Mise à jour de la config et RAZ de la population
-
-	fmt.Printf("\n--- RECEPTION NOUVELLES CONTRAINTES ---\n")
-	fmt.Printf("Largeur: %v, Hauteur: %v, Budget Max: %v Ar\n", config.AreaWidth, config.AreaHeight, config.MaxBudget)
-	fmt.Printf("---------------------------------------\n")
-
 	a.config = config
-	a.points = nil
 	a.InitPopulation()
 }
 
 func (a *App) UpdateCatalog(newCatalog []Sensor) {
 	SensorCatalog = newCatalog
-	for i := range a.points {
-		for j := range a.points[i].Sensors {
-			for _, cat := range SensorCatalog {
-				if a.points[i].Sensors[j].Type == cat.Type {
-					a.points[i].Sensors[j].Cost = cat.Cost
-					a.points[i].Sensors[j].Range = cat.Range
-				}
-			}
-		}
-		a.CalculateFitness(&a.points[i])
-	}
-	a.UpdateParetoFront()
+	a.InitPopulation()
 }
 
 func (a *App) GetCatalog() []Sensor {
 	return SensorCatalog
-}
-
-// findUncoveredPoints retourne une liste de coordonnées (x, y) non couvertes
-func (a *App) findUncoveredPoints(ind *Individual) [][2]float64 {
-	uncovered := [][2]float64{}
-	// On utilise un pas légèrement plus large pour la performance
-	step := 5.0
-
-	for x := 0.0; x < a.config.AreaWidth; x += step {
-		for y := 0.0; y < a.config.AreaHeight; y += step {
-			isCovered := false
-			for _, s := range ind.Sensors {
-				dx := x - s.X
-				dy := y - s.Y
-				if (dx*dx + dy*dy) <= (s.Range * s.Range) {
-					isCovered = true
-					break
-				}
-			}
-			if !isCovered {
-				uncovered = append(uncovered, [2]float64{x, y})
-			}
-		}
-	}
-	return uncovered
 }
