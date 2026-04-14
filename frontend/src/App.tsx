@@ -149,23 +149,33 @@ function App() {
         return counts;
     };
 
-    const paretoSolutions = population
-        .filter(p => p.isPareto && p.fitness > 0)
-        .sort((a, b) => {
-            const sa = a.fitness / (a.totalCost + 1);
-            const sb = b.fitness / (b.totalCost + 1);
-            return sb - sa;
-        })
-        .slice(0, 10);
+    // Fonction de déduplication: supprime les solutions avec un coût trop similaire
+    const getUniqueSolutions = (pop: main.Individual[], limit: number) => {
+        const unique: main.Individual[] = [];
 
-    const bestCompromises = population
-        .filter(p => p.fitness > 0)
-        .sort((a, b) => {
-            const sa = a.fitness / (a.totalCost + 1);
-            const sb = b.fitness / (b.totalCost + 1);
-            return sb - sa;
-        })
-        .slice(0, 10);
+        // Trier par fitness décroissant
+        const sorted = [...pop].filter(p => p.fitness > 0).sort((a, b) => b.fitness - a.fitness);
+
+        for (const ind of sorted) {
+            // Ignorer si une solution avec un coût similaire existe déjà (tolérance: 50000 Ar)
+            const isDuplicate = unique.some(u => Math.abs(u.totalCost - ind.totalCost) < 50000);
+            if (!isDuplicate) {
+                unique.push(ind);
+            }
+            if (unique.length >= limit) break;
+        }
+        return unique;
+    };
+
+    const paretoSolutions = getUniqueSolutions(
+        population.filter(p => p.isPareto),
+        10
+    );
+
+    const bestCompromises = getUniqueSolutions(
+        population,
+        10
+    );
 
     const globalRanking = allSolutions
         .filter(p => p.fitness > 0)
@@ -267,6 +277,8 @@ function App() {
                                         {paretoSolutions.map((ind, idx) => {
                                             const counts = getSensorDetails(ind.sensors);
 
+                                            console.log("Pareto Solution : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
+
                                             return (
                                                 <tr
                                                     key={idx}
@@ -304,6 +316,8 @@ function App() {
                                     <tbody>
                                         {optimalSolutions.map((ind, i) => {
                                             const counts = getSensorDetails(ind.sensors);
+
+                                            console.log("Optimal Solution : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
 
                                             const isSelected = selectedIndividual === ind;
 
@@ -353,6 +367,9 @@ function App() {
                                     <tbody>
                                         {bestCompromises.map((ind, i) => {
                                             const counts = getSensorDetails(ind.sensors);
+
+                                            console.log("Best Compromise : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
+
                                             const isSelected = selectedIndividual === ind;
 
                                             return (
@@ -394,6 +411,9 @@ function App() {
                                 <table className="w-full text-[10px] font-mono">
                                     <tbody>
                                         {globalRanking.map(({ individual: ind, score }, i) => {
+
+                                            console.log("Global Ranking : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
+
                                             const isSelected = selectedIndividual === ind;
 
                                             return (

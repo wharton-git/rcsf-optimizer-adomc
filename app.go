@@ -24,10 +24,10 @@ type Velocity struct {
 }
 
 type Individual struct {
-	Sensors   []Sensor   `json:"sensors"`
-	Velocity  []Velocity `json:"velocity"`
-	PBest     []Sensor   `json:"pBest"`
-	BestFit   float64    `json:"bestFit"`
+	Sensors  []Sensor   `json:"sensors"`
+	Velocity []Velocity `json:"velocity"`
+	PBest    []Sensor   `json:"pBest"`
+	BestFit  float64    `json:"bestFit"`
 
 	Fitness   float64 `json:"fitness"`
 	TotalCost float64 `json:"totalCost"`
@@ -393,42 +393,43 @@ func getSignature(ind Individual) string {
    OPTIMAL DIVERSIFIED (NEW)
 =========================== */
 
+// Dans app.go
 func (a *App) GetOptimalSolutions(limit int) []Individual {
-
 	pareto := []Individual{}
-
 	for _, ind := range a.points {
 		if ind.IsPareto && ind.Fitness > 0 {
 			pareto = append(pareto, ind)
 		}
 	}
 
+	// Trier par efficacité (Fitness / Coût)
 	sort.Slice(pareto, func(i, j int) bool {
-		return pareto[i].Fitness-pareto[i].TotalCost/1e6 >
-			pareto[j].Fitness-pareto[j].TotalCost/1e6
+		return (pareto[i].Fitness / (pareto[i].TotalCost + 1)) >
+			(pareto[j].Fitness / (pareto[j].TotalCost + 1))
 	})
 
 	selected := []Individual{}
-
 	for _, cand := range pareto {
-		ok := true
-
+		isSimilar := false
 		for _, s := range selected {
-			if dist(cand, s) < 50 {
-				ok = false
+			// Filtrer si le coût est trop proche (ex: moins de 50 000 Ar d'écart)
+			// ET que la couverture est très proche
+			costDiff := math.Abs(cand.TotalCost - s.TotalCost)
+			fitDiff := math.Abs(cand.Fitness - s.Fitness)
+
+			if costDiff < 50000 && fitDiff < 0.5 {
+				isSimilar = true
 				break
 			}
 		}
 
-		if ok {
+		if !isSimilar {
 			selected = append(selected, cand)
 		}
-
 		if len(selected) >= limit {
 			break
 		}
 	}
-
 	return selected
 }
 
