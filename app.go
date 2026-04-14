@@ -82,13 +82,28 @@ func (a *App) InitPopulation() {
 		for j := 0; j < numSensors; j++ {
 			t := SensorCatalog[rand.Intn(len(SensorCatalog))]
 
+			// Tenter un placement non-superposé (max 10 essais)
+			var x, y float64
+			for attempt := 0; attempt < 10; attempt++ {
+				x = rand.Float64() * a.config.AreaWidth
+				y = rand.Float64() * a.config.AreaHeight
+				tooClose := false
+				for k := 0; k < j; k++ {
+					dx := x - sensors[k].X
+					dy := y - sensors[k].Y
+					if math.Sqrt(dx*dx+dy*dy) < (t.Range+sensors[k].Range)*0.5 {
+						tooClose = true
+						break
+					}
+				}
+				if !tooClose {
+					break
+				}
+			}
+
 			sensors[j] = Sensor{
-				ID:    j,
-				X:     rand.Float64() * a.config.AreaWidth,
-				Y:     rand.Float64() * a.config.AreaHeight,
-				Range: t.Range,
-				Cost:  t.Cost,
-				Type:  t.Type,
+				ID: j, X: x, Y: y,
+				Range: t.Range, Cost: t.Cost, Type: t.Type,
 			}
 
 			velocities[j] = Velocity{
@@ -165,6 +180,7 @@ func (a *App) UpdatePositions(ind *Individual, gBest []Sensor) {
 	w := 0.7
 	c1 := 1.5
 	c2 := 1.5
+	repulsionStrength := 5.0
 
 	for i := range ind.Sensors {
 		if i >= len(gBest) || i >= len(ind.PBest) {
@@ -174,27 +190,42 @@ func (a *App) UpdatePositions(ind *Individual, gBest []Sensor) {
 		r1 := rand.Float64()
 		r2 := rand.Float64()
 
+		// Force de répulsion entre capteurs du même individu
+		repX, repY := 0.0, 0.0
+		for j := range ind.Sensors {
+			if i == j {
+				continue
+			}
+			dx := ind.Sensors[i].X - ind.Sensors[j].X
+			dy := ind.Sensors[i].Y - ind.Sensors[j].Y
+			d := math.Sqrt(dx*dx+dy*dy) + 0.001
+			minDist := (ind.Sensors[i].Range + ind.Sensors[j].Range) * 0.5
+
+			if d < minDist {
+				repX += (dx / d) * (minDist - d) * repulsionStrength
+				repY += (dy / d) * (minDist - d) * repulsionStrength
+			}
+		}
+
 		ind.Velocity[i].VX =
 			w*ind.Velocity[i].VX +
 				c1*r1*(ind.PBest[i].X-ind.Sensors[i].X) +
-				c2*r2*(gBest[i].X-ind.Sensors[i].X)
+				c2*r2*(gBest[i].X-ind.Sensors[i].X) +
+				repX
 
 		ind.Velocity[i].VY =
 			w*ind.Velocity[i].VY +
 				c1*r1*(ind.PBest[i].Y-ind.Sensors[i].Y) +
-				c2*r2*(gBest[i].Y-ind.Sensors[i].Y)
+				c2*r2*(gBest[i].Y-ind.Sensors[i].Y) +
+				repY
 
-		ind.Sensors[i].X += ind.Velocity[i].VX
-		ind.Sensors[i].Y += ind.Velocity[i].VY
-
-		ind.Sensors[i].X = math.Max(0, math.Min(a.config.AreaWidth, ind.Sensors[i].X))
-		ind.Sensors[i].Y = math.Max(0, math.Min(a.config.AreaHeight, ind.Sensors[i].Y))
+		ind.Sensors[i].X = math.Max(0, math.Min(a.config.AreaWidth, ind.Sensors[i].X+ind.Velocity[i].VX))
+		ind.Sensors[i].Y = math.Max(0, math.Min(a.config.AreaHeight, ind.Sensors[i].Y+ind.Velocity[i].VY))
 	}
 }
 
 func (a *App) CalculateFitness(ind *Individual) {
 	ind.TotalCost = 0
-
 	for _, s := range ind.Sensors {
 		ind.TotalCost += s.Cost
 	}
@@ -204,7 +235,26 @@ func (a *App) CalculateFitness(ind *Individual) {
 		return
 	}
 
-	ind.Fitness = a.computeCoverage(ind.Sensors)
+	coverage := a.computeCoverage(ind.Sensors)
+
+	// Pénalité pour superposition
+	overlapPenalty := 0.0
+	for i := 0; i < len(ind.Sensors); i++ {
+		for j := i + 1; j < len(ind.Sensors); j++ {
+			si, sj := ind.Sensors[i], ind.Sensors[j]
+			dx := si.X - sj.X
+			dy := si.Y - sj.Y
+			dist := math.Sqrt(dx*dx + dy*dy)
+			minDist := (si.Range + sj.Range) * 0.5 // seuil : 50% de chevauchement
+
+			if dist < minDist {
+				overlapPenalty += (minDist - dist) / minDist
+			}
+		}
+	}
+
+	penaltyFactor := 1.0 / (1.0 + overlapPenalty*0.3)
+	ind.Fitness = coverage * penaltyFactor
 }
 
 func (a *App) computeCoverage(sensors []Sensor) float64 {
