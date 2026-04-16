@@ -10,37 +10,41 @@ import {
     Cell,
 } from 'recharts';
 import { main } from "../../wailsjs/go/models";
+import { formatCost, getIndividualKey } from "../utils/solutions";
 
 interface Props {
     population: main.Individual[];
+    selectedSolutionKey?: string | null;
+    recommendedSolutionKey?: string | null;
 }
 
-export default function ParetoChart({ population }: Props) {
+export default function ParetoChart({
+    population,
+    selectedSolutionKey,
+    recommendedSolutionKey,
+}: Props) {
 
-    //  Filtrer solutions valides
     const validData = population
-        .filter(ind => ind.fitness > 0)
-        .map((ind, index) => ({
-            x: ind.totalCost,
-            y: ind.fitness,
-            isPareto: ind.isPareto,
-            sensors: ind.sensors.length,
+        .filter(individual => individual.fitness > 0)
+        .map((individual, index) => ({
+            key: getIndividualKey(individual),
+            x: individual.totalCost,
+            y: individual.fitness,
+            isPareto: individual.isPareto,
+            sensors: individual.sensors.length,
             id: index,
         }));
 
-    //  Pareto front trié
     const paretoLine = validData
         .filter(p => p.isPareto)
         .sort((a, b) => a.x - b.x);
 
-    //  KNEE POINT (meilleur compromis)
     const kneePoint = paretoLine.reduce((best, point) => {
-        const score = point.y / (point.x + 1); // ratio efficacité/coût
+        const score = point.y / (point.x + 1);
         const bestScore = best ? best.y / (best.x + 1) : -1;
         return score > bestScore ? point : best;
     }, null as any);
 
-    //  DENSITÉ LOCALE (simple clustering)
     const computeDensity = (p: any) => {
         let count = 0;
         for (const q of validData) {
@@ -62,14 +66,14 @@ export default function ParetoChart({ population }: Props) {
         ? Math.max(...enrichedData.map(p => p.density))
         : 1;
 
-    const formatCost = (v: number) => `${v.toLocaleString()} Ar`;
+    const selectedPoint = enrichedData.find(point => point.key === selectedSolutionKey) || null;
+    const recommendedPoint = enrichedData.find(point => point.key === recommendedSolutionKey) || null;
 
     return (
         <div className="h-72 w-full bg-slate-900/50 p-2 rounded-xl border border-slate-800">
             <ResponsiveContainer width="100%" height="100%">
                 <ComposedChart margin={{ top: 10, right: 10, bottom: 10, left: -10 }}>
 
-                    {/* AXES */}
                     <XAxis
                         dataKey="x"
                         type="number"
@@ -87,7 +91,6 @@ export default function ParetoChart({ population }: Props) {
 
                     <ZAxis range={[40, 40]} />
 
-                    {/* TOOLTIP AVANCÉ */}
                     <Tooltip
                         contentStyle={{
                             backgroundColor: '#0f172a',
@@ -95,7 +98,7 @@ export default function ParetoChart({ population }: Props) {
                             borderRadius: 8,
                             fontSize: 11,
                         }}
-                        formatter={(value: any, name: any, props: any) => {
+                        formatter={(value: any, name: any) => {
                             if (name === "x") return [formatCost(value), "Coût"];
                             if (name === "y") return [`${value.toFixed(2)}%`, "Couverture"];
                             if (name === "sensors") return [value, "Capteurs"];
@@ -103,15 +106,19 @@ export default function ParetoChart({ population }: Props) {
                         }}
                     />
 
-                    {/*  SCATTER AVEC DENSITÉ VISUELLE */}
                     <Scatter name="Solutions" data={enrichedData}>
                         {enrichedData.map((entry, index) => {
                             const intensity = entry.density / maxDensity;
-
-                            // gradient vert → rouge selon densité
-                            const color = entry.isPareto
+                            let color = entry.isPareto
                                 ? `rgba(16,185,129,${0.3 + intensity * 0.7})`
                                 : `rgba(100,116,139,0.25)`;
+
+                            if (entry.key === recommendedSolutionKey) {
+                                color = 'rgba(245, 158, 11, 0.95)';
+                            }
+                            if (entry.key === selectedSolutionKey) {
+                                color = 'rgba(59, 130, 246, 0.95)';
+                            }
 
                             return (
                                 <Cell
@@ -122,7 +129,6 @@ export default function ParetoChart({ population }: Props) {
                         })}
                     </Scatter>
 
-                    {/*  FRONT PARETO LISSE */}
                     <Line
                         type="monotone"
                         data={paretoLine}
@@ -133,7 +139,6 @@ export default function ParetoChart({ population }: Props) {
                         isAnimationActive={false}
                     />
 
-                    {/*  KNEE POINT (meilleur compromis) */}
                     {kneePoint && (
                         <Scatter
                             data={[kneePoint]}
@@ -141,14 +146,27 @@ export default function ParetoChart({ population }: Props) {
                         />
                     )}
 
+                    {recommendedPoint && (
+                        <Scatter
+                            data={[recommendedPoint]}
+                            fill="#f59e0b"
+                        />
+                    )}
+
+                    {selectedPoint && (
+                        <Scatter
+                            data={[selectedPoint]}
+                            fill="#3b82f6"
+                        />
+                    )}
+
                 </ComposedChart>
             </ResponsiveContainer>
 
-            {/*  LÉGENDE */}
             <div className="flex justify-between text-[10px] text-slate-400 mt-1 px-2">
                 <span>🟢 Pareto optimal</span>
-                <span>🟡 Meilleur compromis</span>
-                <span>🔵 Densité des solutions</span>
+                <span>🟡 Recommandee ADOMC</span>
+                <span>🔵 Selectionnee</span>
             </div>
         </div>
     );

@@ -1,155 +1,234 @@
-import { useEffect, useRef, useState } from 'react';
+import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import {
+    AnalyzeDecision,
     Evolve,
+    ExportDecisionCSV,
+    ExportDecisionJSON,
     GetAllSolutions,
     GetCatalog,
     GetConfig,
+    GetDecisionCriteria,
+    GetDecisionScenarios,
     GetOptimalSolutions,
     InitPopulation,
     SetConstraints,
     UpdateCatalog,
 } from "../wailsjs/go/main/App";
-import ParetoChart from './components/ParetoChart';
 import { main } from "../wailsjs/go/models";
+import ComparisonPanel from './components/ComparisonPanel';
+import DecisionControls from './components/DecisionControls';
+import DecisionRankingTable, { type DecisionSortConfig, type DecisionSortKey } from './components/DecisionRankingTable';
+import ParetoChart from './components/ParetoChart';
+import PriorityZonesPanel from './components/PriorityZonesPanel';
+import RecommendationPanel from './components/RecommendationPanel';
+import SensitivityPanel from './components/SensitivityPanel';
+import {
+    SENSOR_COLORS,
+    formatCost,
+    formatMaterial,
+    formatPercent,
+    getIndividualKey,
+    getRankedSolutionById,
+} from './utils/solutions';
 
-const DEFAULT_CONFIG: main.Config = {
+const DEFAULT_CONFIG = main.Config.createFrom({
     areaWidth: 80,
     areaHeight: 60,
     population: 50,
     maxBudget: 2000000,
+    priorityZones: [],
+    forbiddenZones: [],
+    obstacleZones: [],
+    mandatoryZones: [],
+});
+
+const DEFAULT_WEIGHTS: main.DecisionWeights = {
+    coverage: 0.3,
+    cost: 0.25,
+    overlap: 0.15,
+    sensorCount: 0.1,
+    robustness: 0.2,
 };
 
-const SOLUTION_COST_TOLERANCE = 50000;
-const SOLUTION_FITNESS_TOLERANCE = 0.2;
+const DEFAULT_REQUEST = main.DecisionRequest.createFrom({
+    scenarioID: "balanced",
+    candidateSource: "pareto",
+    primaryMethod: "topsis",
+    weights: DEFAULT_WEIGHTS,
+});
 
-const SENSOR_COLORS: Record<string, { bg: string, stroke: string, dot: string }> = {
-    "Eco-A": { bg: 'rgba(34, 197, 94, 0.15)', stroke: 'rgba(34, 197, 94, 0.4)', dot: '#22c55e' },
-    "Standard-B": { bg: 'rgba(59, 130, 246, 0.15)', stroke: 'rgba(59, 130, 246, 0.4)', dot: '#3b82f6' },
-    "Premium-C": { bg: 'rgba(168, 85, 247, 0.15)', stroke: 'rgba(168, 85, 247, 0.4)', dot: '#a855f7' },
+const DEFAULT_SORT: DecisionSortConfig = {
+    key: 'rank',
+    direction: 'asc',
 };
 
-const formatMaterial = (sensors: main.Sensor[]) => {
-    const counts: Record<string, number> = {};
-    sensors.forEach(sensor => {
-        counts[sensor.type] = (counts[sensor.type] || 0) + 1;
-    });
-    return counts;
-};
-
-const getMaterialSignature = (sensors: main.Sensor[]) => Object.entries(formatMaterial(sensors))
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([type, count]) => `${type}:${count}`)
-    .join('|');
-
-const getSolutionKey = (individual: main.Individual) =>
-    `${Math.round(individual.totalCost)}-${individual.fitness.toFixed(3)}-${getMaterialSignature(individual.sensors)}`;
-
-const getSolutionScore = (individual: main.Individual) => individual.fitness / (individual.totalCost + 1);
-
-const areSolutionsSimilar = (left: main.Individual, right: main.Individual) => {
-    if (left.sensors.length !== right.sensors.length) {
-        return false;
-    }
-
-    if (getMaterialSignature(left.sensors) !== getMaterialSignature(right.sensors)) {
-        return false;
-    }
-
-    return Math.abs(left.totalCost - right.totalCost) <= SOLUTION_COST_TOLERANCE &&
-        Math.abs(left.fitness - right.fitness) <= SOLUTION_FITNESS_TOLERANCE;
-};
-
-const compareByFitnessThenCost = (left: main.Individual, right: main.Individual) => {
-    if (Math.abs(left.fitness - right.fitness) > Number.EPSILON) {
-        return right.fitness - left.fitness;
-    }
-
-    if (Math.abs(left.totalCost - right.totalCost) > Number.EPSILON) {
-        return left.totalCost - right.totalCost;
-    }
-
-    return left.sensors.length - right.sensors.length;
-};
-
-const compareByScoreThenFitness = (left: main.Individual, right: main.Individual) => {
-    const scoreDiff = getSolutionScore(right) - getSolutionScore(left);
-    if (Math.abs(scoreDiff) > Number.EPSILON) {
-        return scoreDiff;
-    }
-
-    return compareByFitnessThenCost(left, right);
-};
-
-const getDistinctSolutions = (
-    pool: main.Individual[],
-    limit: number,
-    compare: (left: main.Individual, right: main.Individual) => number,
+const buildSensitivitySummary = (
+    previousAnalysis: main.DecisionAnalysis | null,
+    nextAnalysis: main.DecisionAnalysis | null,
 ) => {
-    const unique: main.Individual[] = [];
-    const sorted = [...pool]
-        .filter(individual => individual.fitness > 0)
-        .sort(compare);
-
-    for (const candidate of sorted) {
-        if (unique.some(current => areSolutionsSimilar(current, candidate))) {
-            continue;
-        }
-
-        unique.push(candidate);
-        if (unique.length >= limit) {
-            break;
-        }
+    if (!previousAnalysis || !nextAnalysis) {
+        return "";
     }
 
-    return unique;
+    const previousTop = previousAnalysis.rankedSolutions[0];
+    const nextTop = nextAnalysis.rankedSolutions[0];
+    if (!previousTop || !nextTop) {
+        return "";
+    }
+
+    const parts: string[] = [];
+
+    if (previousTop.solutionID === nextTop.solutionID) {
+        parts.push(`${nextTop.label} reste la solution recommandee.`);
+    } else {
+        parts.push(`La recommandation change de ${previousTop.label} vers ${nextTop.label} quand les poids evoluent.`);
+    }
+
+    const previousRanks = new Map(previousAnalysis.rankedSolutions.map(solution => [solution.solutionID, solution.rank]));
+    const majorMoves = nextAnalysis.rankedSolutions
+        .slice(0, 5)
+        .filter(solution => {
+            const previousRank = previousRanks.get(solution.solutionID);
+            return previousRank && Math.abs(previousRank - solution.rank) >= 2;
+        })
+        .map(solution => `${solution.label} (${previousRanks.get(solution.solutionID)} -> ${solution.rank})`);
+
+    if (majorMoves.length === 0) {
+        parts.push("Le haut du classement reste globalement stable.");
+    } else {
+        parts.push(`Les principaux changements de rang sont: ${majorMoves.join(', ')}.`);
+    }
+
+    return parts.join(' ');
+};
+
+const sortRankedSolutions = (
+    solutions: main.RankedSolution[],
+    sortConfig: DecisionSortConfig,
+) => {
+    const sorted = [...solutions];
+    const direction = sortConfig.direction === 'asc' ? 1 : -1;
+
+    sorted.sort((left, right) => {
+        const getValue = (solution: main.RankedSolution, key: DecisionSortKey) => {
+            switch (key) {
+                case 'label':
+                    return solution.label;
+                case 'coverage':
+                    return solution.metrics.coverage;
+                case 'cost':
+                    return solution.metrics.cost;
+                case 'overlap':
+                    return solution.metrics.overlap;
+                case 'sensorCount':
+                    return solution.metrics.sensorCount;
+                case 'robustness':
+                    return solution.metrics.robustness;
+                case 'topsis':
+                    return solution.topsisScore;
+                case 'rank':
+                    return solution.rank;
+                case 'paretoStatus':
+                    return solution.paretoStatus ? 1 : 0;
+                default:
+                    return solution.rank;
+            }
+        };
+
+        const leftValue = getValue(left, sortConfig.key);
+        const rightValue = getValue(right, sortConfig.key);
+
+        if (typeof leftValue === 'string' && typeof rightValue === 'string') {
+            return leftValue.localeCompare(rightValue) * direction;
+        }
+
+        return ((leftValue as number) - (rightValue as number)) * direction;
+    });
+
+    return sorted;
+};
+
+const downloadTextFile = (filename: string, content: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    URL.revokeObjectURL(url);
 };
 
 function App() {
     const [population, setPopulation] = useState<main.Individual[]>([]);
     const [isRunning, setIsRunning] = useState(false);
     const [catalog, setCatalog] = useState<main.Sensor[]>([]);
-    const [selectedIndividual, setSelectedIndividual] = useState<main.Individual | null>(null);
-    const [optimalSolutions, setOptimalSolutions] = useState<main.Individual[]>([]);
-    const [allSolutions, setAllSolutions] = useState<main.Individual[]>([]);
     const [config, setConfig] = useState<main.Config>(DEFAULT_CONFIG);
+    const [paretoShortlist, setParetoShortlist] = useState<main.Individual[]>([]);
+
+    const [decisionCriteria, setDecisionCriteria] = useState<main.DecisionCriterion[]>([]);
+    const [decisionScenarios, setDecisionScenarios] = useState<main.DecisionScenario[]>([]);
+    const [decisionRequest, setDecisionRequest] = useState<main.DecisionRequest>(DEFAULT_REQUEST);
+    const [decisionAnalysis, setDecisionAnalysis] = useState<main.DecisionAnalysis | null>(null);
+    const [previousDecisionAnalysis, setPreviousDecisionAnalysis] = useState<main.DecisionAnalysis | null>(null);
+    const [sensitivitySummary, setSensitivitySummary] = useState("");
+
+    const [selectedSolutionId, setSelectedSolutionId] = useState<string | null>(null);
+    const [selectedSolutionKey, setSelectedSolutionKey] = useState<string | null>(null);
+    const [comparisonIds, setComparisonIds] = useState<string[]>([]);
+    const [sortConfig, setSortConfig] = useState<DecisionSortConfig>(DEFAULT_SORT);
 
     const [dynamicScale, setDynamicScale] = useState(10);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
+    const lastAnalysisRef = useRef<main.DecisionAnalysis | null>(null);
+    const decisionChangedByWeightsRef = useRef(false);
 
-    const syncPopulationSnapshot = async () => {
-        const solutions = await GetAllSolutions();
+    const deferredPopulation = useDeferredValue(population);
+
+    const refreshSolutionsFromBackend = async () => {
+        const [solutions, shortlist] = await Promise.all([
+            GetAllSolutions(),
+            GetOptimalSolutions(10),
+        ]);
+
         setPopulation(solutions);
-        setAllSolutions(solutions);
+        setParetoShortlist(shortlist);
     };
 
     useEffect(() => {
         let active = true;
 
         const bootstrap = async () => {
-            const backendConfig = await GetConfig();
-            if (!active) {
-                return;
-            }
-
-            setConfig(backendConfig);
-            await InitPopulation();
-            if (!active) {
-                return;
-            }
-
-            const [solutions, sensorCatalog] = await Promise.all([
-                GetAllSolutions(),
+            const [backendConfig, sensorCatalog, scenarios, criteria] = await Promise.all([
+                GetConfig(),
                 GetCatalog(),
+                GetDecisionScenarios(),
+                GetDecisionCriteria(),
             ]);
 
             if (!active) {
                 return;
             }
 
-            setPopulation(solutions);
-            setAllSolutions(solutions);
+            const balancedScenario = scenarios.find(scenario => scenario.id === "balanced") || scenarios[0];
+
+            setConfig(main.Config.createFrom(backendConfig));
             setCatalog(sensorCatalog);
+            setDecisionScenarios(scenarios);
+            setDecisionCriteria(criteria);
+            setDecisionRequest(main.DecisionRequest.createFrom({
+                scenarioID: balancedScenario?.id || DEFAULT_REQUEST.scenarioID,
+                candidateSource: DEFAULT_REQUEST.candidateSource,
+                primaryMethod: DEFAULT_REQUEST.primaryMethod,
+                weights: balancedScenario?.weights || DEFAULT_WEIGHTS,
+            }));
+
+            await InitPopulation();
+            if (!active) {
+                return;
+            }
+
+            await refreshSolutionsFromBackend();
         };
 
         bootstrap().catch(console.error);
@@ -165,76 +244,76 @@ function App() {
             const padding = 64;
             const availableWidth = containerRef.current.clientWidth - padding;
             const availableHeight = containerRef.current.clientHeight - padding;
-            const scaleW = availableWidth / config.areaWidth;
-            const scaleH = availableHeight / config.areaHeight;
+            const scaleW = availableWidth / Math.max(config.areaWidth, 1);
+            const scaleH = availableHeight / Math.max(config.areaHeight, 1);
             setDynamicScale(Math.min(scaleW, scaleH));
         };
+
         updateScale();
         window.addEventListener('resize', updateScale);
         return () => window.removeEventListener('resize', updateScale);
     }, [config.areaWidth, config.areaHeight]);
 
     useEffect(() => {
-        const loadOptimalSolutions = async () => {
-            const solutions = await GetOptimalSolutions(10);
-            setOptimalSolutions(getDistinctSolutions(solutions, 10, compareByScoreThenFitness));
-        };
-
-        if (population.length > 0) {
-            loadOptimalSolutions().catch(console.error);
+        if (deferredPopulation.length === 0) {
+            setDecisionAnalysis(null);
+            setParetoShortlist([]);
             return;
         }
 
-        setOptimalSolutions([]);
-    }, [population]);
+        let active = true;
 
-    const handleConfigChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const { name, value } = e.target;
-        const nextConfig = { ...config, [name]: Number(value) };
-        setConfig(nextConfig);
-        setSelectedIndividual(null);
+        const loadDecisionData = async () => {
+            const [analysis, shortlist] = await Promise.all([
+                AnalyzeDecision(decisionRequest),
+                GetOptimalSolutions(10),
+            ]);
 
-        try {
-            await SetConstraints(nextConfig as main.Config);
-            await syncPopulationSnapshot();
-        } catch (err) {
-            console.error(err);
-        }
-    };
+            if (!active) {
+                return;
+            }
 
-    const handleCatalogUpdate = async (index: number, field: 'range' | 'cost', value: number) => {
-        const nextCatalog = catalog.map((item, itemIndex) => (
-            itemIndex === index ? { ...item, [field]: value } : item
-        ));
+            const previousAnalysis = decisionChangedByWeightsRef.current ? lastAnalysisRef.current : null;
+            setPreviousDecisionAnalysis(previousAnalysis);
+            setSensitivitySummary(buildSensitivitySummary(previousAnalysis, analysis));
+            setDecisionAnalysis(analysis);
+            setParetoShortlist(shortlist);
+            lastAnalysisRef.current = analysis;
+            decisionChangedByWeightsRef.current = false;
 
-        setCatalog(nextCatalog);
-        setSelectedIndividual(null);
+            if (!analysis.rankedSolutions.some(solution => solution.solutionID === selectedSolutionId)) {
+                const recommended = analysis.rankedSolutions[0];
+                setSelectedSolutionId(recommended?.solutionID || null);
+                setSelectedSolutionKey(recommended ? getIndividualKey(recommended.individual) : null);
+            }
+        };
 
-        try {
-            await UpdateCatalog(nextCatalog);
-            await syncPopulationSnapshot();
-        } catch (err) {
-            console.error(err);
-        }
-    };
+        loadDecisionData().catch(console.error);
+
+        return () => {
+            active = false;
+        };
+    }, [deferredPopulation, decisionRequest, selectedSolutionId]);
 
     useEffect(() => {
         let active = true;
 
-        async function loop() {
-            if (!isRunning || !active) return;
+        const loop = async () => {
+            if (!isRunning || !active) {
+                return;
+            }
 
             try {
-                const nextGen = await Evolve();
+                const nextGeneration = await Evolve();
                 if (active && isRunning) {
-                    setPopulation(nextGen);
-                    setAllSolutions(nextGen);
-                    setTimeout(loop, 10);
+                    decisionChangedByWeightsRef.current = false;
+                    setPopulation(nextGeneration);
+                    setTimeout(loop, 25);
                 }
-            } catch (err) {
-                console.error(err);
+            } catch (error) {
+                console.error(error);
             }
-        }
+        };
 
         if (isRunning) {
             loop();
@@ -245,289 +324,528 @@ function App() {
         };
     }, [isRunning]);
 
+    const recommendedSolution = decisionAnalysis?.rankedSolutions[0] || null;
+    const recommendedSolutionKey = recommendedSolution
+        ? getIndividualKey(recommendedSolution.individual)
+        : null;
+
     useEffect(() => {
         const canvas = canvasRef.current;
-        if (!canvas || population.length === 0) return;
-        const ctx = canvas.getContext('2d');
-        if (!ctx) return;
+        if (!canvas || population.length === 0) {
+            return;
+        }
 
-        ctx.clearRect(0, 0, config.areaWidth * dynamicScale, config.areaHeight * dynamicScale);
-        const displayTarget = selectedIndividual || population.find(point => point.isPareto) || population[0];
+        const context = canvas.getContext('2d');
+        if (!context) {
+            return;
+        }
+
+        context.clearRect(0, 0, config.areaWidth * dynamicScale, config.areaHeight * dynamicScale);
+
+        config.priorityZones.forEach(zone => {
+            context.fillStyle = 'rgba(251, 191, 36, 0.14)';
+            context.strokeStyle = 'rgba(251, 191, 36, 0.55)';
+            context.lineWidth = 1;
+            context.fillRect(
+                zone.x * dynamicScale,
+                zone.y * dynamicScale,
+                zone.width * dynamicScale,
+                zone.height * dynamicScale,
+            );
+            context.strokeRect(
+                zone.x * dynamicScale,
+                zone.y * dynamicScale,
+                zone.width * dynamicScale,
+                zone.height * dynamicScale,
+            );
+        });
+
+        const displayTarget = population.find(individual => getIndividualKey(individual) === selectedSolutionKey)
+            || population.find(individual => getIndividualKey(individual) === recommendedSolutionKey)
+            || population.find(individual => individual.isPareto)
+            || population[0];
 
         displayTarget?.sensors?.forEach(sensor => {
             const colors = SENSOR_COLORS[sensor.type] || SENSOR_COLORS["Standard-B"];
-            ctx.beginPath();
-            ctx.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, sensor.range * dynamicScale, 0, 2 * Math.PI);
-            ctx.fillStyle = colors.bg;
-            ctx.fill();
-            ctx.strokeStyle = colors.stroke;
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, 3, 0, 2 * Math.PI);
-            ctx.fillStyle = colors.dot;
-            ctx.fill();
+            context.beginPath();
+            context.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, sensor.range * dynamicScale, 0, 2 * Math.PI);
+            context.fillStyle = colors.bg;
+            context.fill();
+            context.strokeStyle = colors.stroke;
+            context.stroke();
+            context.beginPath();
+            context.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, 4, 0, 2 * Math.PI);
+            context.fillStyle = colors.dot;
+            context.fill();
         });
-    }, [population, config, dynamicScale, selectedIndividual]);
+    }, [config, dynamicScale, population, recommendedSolutionKey, selectedSolutionKey]);
 
-    const paretoSolutions = getDistinctSolutions(
-        population.filter(individual => individual.isPareto),
-        10,
-        compareByFitnessThenCost,
+    const handleConfigChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+        const { name, value } = event.target;
+        const nextConfig = main.Config.createFrom({
+            ...config,
+            [name]: Number(value),
+        });
+
+        setConfig(nextConfig);
+        setSelectedSolutionId(null);
+        setSelectedSolutionKey(null);
+        decisionChangedByWeightsRef.current = false;
+
+        try {
+            await SetConstraints(nextConfig as main.Config);
+            await refreshSolutionsFromBackend();
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const handleCatalogUpdate = async (index: number, field: 'range' | 'cost', value: number) => {
+        const nextCatalog = catalog.map((item, itemIndex) => (
+            itemIndex === index ? { ...item, [field]: value } : item
+        ));
+
+        setCatalog(nextCatalog);
+        setSelectedSolutionId(null);
+        setSelectedSolutionKey(null);
+        decisionChangedByWeightsRef.current = false;
+
+        try {
+            await UpdateCatalog(nextCatalog);
+            await refreshSolutionsFromBackend();
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const handlePriorityZonesChange = async (zones: main.PriorityZone[]) => {
+        const nextConfig = main.Config.createFrom({
+            ...config,
+            priorityZones: zones,
+        });
+
+        setConfig(nextConfig);
+        decisionChangedByWeightsRef.current = false;
+
+        try {
+            await SetConstraints(nextConfig as main.Config);
+            await refreshSolutionsFromBackend();
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const handleScenarioSelect = (scenario: main.DecisionScenario) => {
+        decisionChangedByWeightsRef.current = true;
+        setDecisionRequest(main.DecisionRequest.createFrom({
+            ...decisionRequest,
+            scenarioID: scenario.id,
+            weights: scenario.weights,
+        }));
+    };
+
+    const handleWeightChange = (key: keyof main.DecisionWeights, value: number) => {
+        decisionChangedByWeightsRef.current = true;
+        setDecisionRequest(main.DecisionRequest.createFrom({
+            ...decisionRequest,
+            scenarioID: "manual",
+            weights: {
+                ...decisionRequest.weights,
+                [key]: value,
+            },
+        }));
+    };
+
+    const handleCandidateSourceChange = (candidateSource: string) => {
+        decisionChangedByWeightsRef.current = true;
+        setDecisionRequest(main.DecisionRequest.createFrom({
+            ...decisionRequest,
+            candidateSource,
+        }));
+    };
+
+    const handleSortChange = (key: DecisionSortKey) => {
+        setSortConfig(current => (
+            current.key === key
+                ? { key, direction: current.direction === 'asc' ? 'desc' : 'asc' }
+                : { key, direction: key === 'rank' ? 'asc' : 'desc' }
+        ));
+    };
+
+    const handleSelectRankedSolution = (solutionID: string) => {
+        setSelectedSolutionId(solutionID);
+        const solution = getRankedSolutionById(decisionAnalysis, solutionID);
+        setSelectedSolutionKey(solution ? getIndividualKey(solution.individual) : null);
+    };
+
+    const toggleComparison = (solutionID: string) => {
+        setComparisonIds(current => {
+            if (current.includes(solutionID)) {
+                return current.filter(id => id !== solutionID);
+            }
+            if (current.length >= 3) {
+                return [...current.slice(1), solutionID];
+            }
+            return [...current, solutionID];
+        });
+    };
+
+    const handleExportCSV = async () => {
+        try {
+            const content = await ExportDecisionCSV(decisionRequest);
+            downloadTextFile("decision-analysis.csv", content, "text/csv;charset=utf-8");
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const handleExportJSON = async () => {
+        try {
+            const content = await ExportDecisionJSON(decisionRequest);
+            downloadTextFile("decision-analysis.json", content, "application/json;charset=utf-8");
+        } catch (error) {
+            console.error(error);
+        }
+    };
+
+    const sortedRankedSolutions = sortRankedSolutions(
+        decisionAnalysis?.rankedSolutions || [],
+        sortConfig,
     );
 
-    const bestCompromises = getDistinctSolutions(
-        population,
-        10,
-        compareByFitnessThenCost,
+    const comparisonSolutions = comparisonIds
+        .map(solutionID => getRankedSolutionById(decisionAnalysis, solutionID))
+        .filter((solution): solution is main.RankedSolution => Boolean(solution));
+
+    const baselineRecommended = getRankedSolutionById(
+        decisionAnalysis,
+        decisionAnalysis?.weightedSumRecommendedSolutionID || "",
     );
 
-    const globalRanking = getDistinctSolutions(
-        allSolutions,
-        20,
-        compareByScoreThenFitness,
-    );
+    const displayTarget = population.find(individual => getIndividualKey(individual) === selectedSolutionKey)
+        || population.find(individual => getIndividualKey(individual) === recommendedSolutionKey)
+        || population.find(individual => individual.isPareto)
+        || population[0];
 
     return (
-        <div className="flex h-screen bg-slate-950 text-slate-200 overflow-hidden font-sans">
-            <aside className="bg-slate-900 w-max min-w-max border-r border-slate-800 p-5 flex flex-col gap-6 overflow-y-auto shadow-2xl z-10 custom-scrollbar">
-                <h1 className="text-2xl font-black text-white tracking-tighter text-center italic">RCSF<span className="text-emerald-500">.mg</span></h1>
+        <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
+            <aside className="w-[420px] shrink-0 border-r border-slate-800 bg-slate-900/95 p-5 overflow-y-auto custom-scrollbar">
+                <div className="space-y-6">
+                    <div>
+                        <h1 className="text-3xl font-black tracking-tight text-white italic">
+                            RCSF<span className="text-emerald-400">.mg</span>
+                        </h1>
+                        <p className="mt-2 text-sm text-slate-400">
+                            Optimisation hybride GA + PSO, enrichie par une couche ADOMC explicite.
+                        </p>
+                    </div>
 
-                <div className="flex gap-4">
-                    <div className="w-72 flex-col space-y-5">
-                        <div className="space-y-4 bg-slate-800/40 p-4 rounded-xl border border-slate-700">
-                            <div className="grid grid-cols-2 gap-3">
-                                <div>
-                                    <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Hauteur (m)</label>
-                                    <input type="number" name="areaHeight" value={config.areaHeight} onChange={handleConfigChange} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs font-mono mt-1" />
-                                </div>
-                                <div>
-                                    <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Largeur (m)</label>
-                                    <input type="number" name="areaWidth" value={config.areaWidth} onChange={handleConfigChange} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs font-mono mt-1" />
-                                </div>
-                            </div>
-
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4 space-y-4">
+                        <div className="grid grid-cols-2 gap-3">
                             <div>
-                                <div className="flex justify-between items-center">
-                                    <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Population</label>
-                                    <span className="text-[10px] font-mono text-emerald-500">{config.population} individus</span>
-                                </div>
-                                <input type="range" name="population" min="10" max="200" step="10" value={config.population} onChange={handleConfigChange} className="w-full mt-2 accent-emerald-500" />
+                                <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Largeur (m)</label>
+                                <input
+                                    type="number"
+                                    name="areaWidth"
+                                    value={config.areaWidth}
+                                    onChange={handleConfigChange}
+                                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
                             </div>
-
                             <div>
-                                <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Budget Max (Ar)</label>
-                                <input type="number" name="maxBudget" value={config.maxBudget} onChange={handleConfigChange} className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1.5 text-xs font-mono mt-1 text-emerald-400 font-bold" />
+                                <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Hauteur (m)</label>
+                                <input
+                                    type="number"
+                                    name="areaHeight"
+                                    value={config.areaHeight}
+                                    onChange={handleConfigChange}
+                                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm"
+                                />
                             </div>
                         </div>
 
-                        <div className="space-y-3 bg-slate-800/20 p-4 rounded-xl border border-slate-800/50">
-                            <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Édition du Catalogue</label>
-                            <div className="space-y-2">
-                                {catalog.map((item, idx) => (
-                                    <div key={item.type} className="flex items-center gap-3 bg-slate-900/80 p-2 rounded-lg border border-slate-800">
-                                        <div className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: SENSOR_COLORS[item.type]?.dot }}></div>
-                                        <div className="text-[10px] font-bold w-16 uppercase">{item.type.split('-')[0]}</div>
-                                        <div className="flex gap-2 flex-1 items-center">
-                                            <div className="flex flex-col">
-                                                <span className="text-[8px] text-slate-600 uppercase">Portée</span>
-                                                <input type="number" value={item.range} onChange={(e) => handleCatalogUpdate(idx, 'range', Number(e.target.value))} className="w-16 bg-slate-950 border border-slate-800 rounded px-1 py-0.5 text-[10px] text-center" />
-                                            </div>
-                                            <div className="flex flex-col flex-1">
-                                                <span className="text-[8px] text-slate-600 uppercase text-right">Prix (Ar)</span>
-                                                <input type="number" value={item.cost} onChange={(e) => handleCatalogUpdate(idx, 'cost', Number(e.target.value))} className="w-full bg-slate-950 border border-slate-800 rounded px-1 py-0.5 text-[10px] text-right text-emerald-500 font-mono" />
-                                            </div>
+                        <div>
+                            <div className="flex items-center justify-between">
+                                <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Population</label>
+                                <span className="text-xs font-mono text-emerald-400">{config.population}</span>
+                            </div>
+                            <input
+                                type="range"
+                                name="population"
+                                min="10"
+                                max="200"
+                                step="10"
+                                value={config.population}
+                                onChange={handleConfigChange}
+                                className="mt-2 w-full accent-emerald-500"
+                            />
+                        </div>
+
+                        <div>
+                            <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Budget max (Ar)</label>
+                            <input
+                                type="number"
+                                name="maxBudget"
+                                value={config.maxBudget}
+                                onChange={handleConfigChange}
+                                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-emerald-300"
+                            />
+                        </div>
+                    </div>
+
+                    <DecisionControls
+                        criteria={decisionCriteria}
+                        scenarios={decisionScenarios}
+                        request={decisionRequest}
+                        onScenarioSelect={handleScenarioSelect}
+                        onWeightChange={handleWeightChange}
+                        onCandidateSourceChange={handleCandidateSourceChange}
+                    />
+
+                    <PriorityZonesPanel
+                        zones={config.priorityZones}
+                        areaWidth={config.areaWidth}
+                        areaHeight={config.areaHeight}
+                        onChange={handlePriorityZonesChange}
+                    />
+
+                    <div className="rounded-2xl border border-slate-800 bg-slate-950/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <h2 className="text-xs font-bold uppercase tracking-[0.22em] text-slate-400">Catalogue</h2>
+                            <span className="text-[11px] text-slate-500">Capteurs editables</span>
+                        </div>
+
+                        <div className="mt-3 space-y-3">
+                            {catalog.map((item, index) => (
+                                <div key={item.type} className="rounded-xl border border-slate-800 bg-slate-900/80 p-3">
+                                    <div className="flex items-center gap-2">
+                                        <span
+                                            className="h-2.5 w-2.5 rounded-full"
+                                            style={{ backgroundColor: SENSOR_COLORS[item.type]?.dot || '#94a3b8' }}
+                                        />
+                                        <span className="text-sm font-semibold">{item.type}</span>
+                                    </div>
+
+                                    <div className="mt-3 grid grid-cols-2 gap-3">
+                                        <div>
+                                            <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Portee</label>
+                                            <input
+                                                type="number"
+                                                value={item.range}
+                                                onChange={(event) => handleCatalogUpdate(index, 'range', Number(event.target.value))}
+                                                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className="text-[10px] uppercase tracking-[0.22em] text-slate-500">Cout (Ar)</label>
+                                            <input
+                                                type="number"
+                                                value={item.cost}
+                                                onChange={(event) => handleCatalogUpdate(index, 'cost', Number(event.target.value))}
+                                                className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm"
+                                            />
                                         </div>
                                     </div>
-                                ))}
-                            </div>
-                        </div>
-
-                        <button onClick={() => setIsRunning(!isRunning)} className={`w-full py-4 rounded-xl font-black tracking-widest transition-all active:scale-[0.98] shadow-lg ${isRunning ? 'bg-red-500/20 text-red-500 border border-red-500/50 hover:bg-red-500 hover:text-white' : 'bg-emerald-600 text-white hover:bg-emerald-500 shadow-emerald-900/40'}`}>
-                            {isRunning ? "ARRÊTER L'OPTIMISATION" : "LANCER L'OPTIMISATION"}
-                        </button>
-
-                        <div className="mt-auto">
-                            <ParetoChart population={population} />
+                                </div>
+                            ))}
                         </div>
                     </div>
 
-                    <div className="w-80 flex flex-col gap-6">
-                        <div className="space-y-3">
-                            <div className="flex justify-between items-center px-1">
-                                <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Top 10 Pareto Solutions</h3>
-                                {selectedIndividual && (
-                                    <button onClick={() => setSelectedIndividual(null)} className="text-[9px] bg-blue-500/20 text-blue-400 px-2 py-1 rounded border border-blue-500/30 hover:bg-blue-500 hover:text-white transition-all">AUTO</button>
-                                )}
-                            </div>
-                            <div className="bg-slate-950/50 rounded-xl border border-slate-800 overflow-hidden shadow-inner">
-                                <table className="w-full text-left border-collapse">
-                                    <thead className="bg-slate-800/50 text-[9px] text-slate-500 uppercase">
-                                        <tr>
-                                            <th className="p-3">Cover %</th>
-                                            <th className="p-3 text-emerald-500">Coût (Ar)</th>
-                                            <th className="p-3 text-right">Matériel</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-slate-800/40 font-mono">
-                                        {paretoSolutions.map((individual) => (
-                                            <tr
-                                                key={getSolutionKey(individual)}
-                                                onClick={() => setSelectedIndividual(individual)}
-                                                className={`cursor-pointer transition-colors text-[10px] hover:bg-slate-800 ${selectedIndividual === individual ? 'bg-emerald-500/10 text-emerald-400' : ''}`}
-                                            >
-                                                <td className="p-3 font-bold">{individual.fitness.toFixed(1)}%</td>
-                                                <td className="p-3">{individual.totalCost.toLocaleString()}</td>
-                                                <td className="p-3 text-right flex justify-end gap-1">
-                                                    {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
-                                                        <span
-                                                            key={`${getSolutionKey(individual)}-${type}`}
-                                                            className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
-                                                        >
-                                                            {count}{type[0]}
-                                                        </span>
-                                                    ))}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div className="mt-6">
-                            <h3 className="text-[10px] font-bold text-emerald-400 uppercase mb-2">
-                                Solutions Optimales Diversifiées
-                            </h3>
-
-                            <div className="bg-slate-950/50 border border-emerald-500/20 rounded-xl overflow-hidden">
-                                <table className="w-full text-[10px] font-mono">
-                                    <tbody>
-                                        {optimalSolutions.map((individual) => {
-                                            const isSelected = selectedIndividual === individual;
-
-                                            return (
-                                                <tr
-                                                    key={getSolutionKey(individual)}
-                                                    onClick={() => setSelectedIndividual(individual)}
-                                                    className={`cursor-pointer transition-colors hover:bg-emerald-500/10 ${isSelected ? 'bg-emerald-500/10 text-emerald-400' : ''}`}
-                                                >
-                                                    <td className="p-2 text-emerald-400 font-bold">
-                                                        {individual.fitness.toFixed(1)}%
-                                                    </td>
-
-                                                    <td className="p-2">
-                                                        {individual.totalCost.toLocaleString()} Ar
-                                                    </td>
-
-                                                    <td className="p-2 text-right">
-                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
-                                                            <span
-                                                                key={`${getSolutionKey(individual)}-${type}`}
-                                                                className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
-                                                            >
-                                                                {count}{type[0]}
-                                                            </span>
-                                                        ))}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div className="mt-6">
-                            <h3 className="text-[10px] font-bold text-yellow-400 uppercase mb-2">
-                                Meilleurs Compromis
-                            </h3>
-
-                            <div className="bg-slate-950/50 border border-yellow-500/20 rounded-xl overflow-hidden">
-                                <table className="w-full text-[10px] font-mono">
-                                    <tbody>
-                                        {bestCompromises.map((individual) => {
-                                            const isSelected = selectedIndividual === individual;
-
-                                            return (
-                                                <tr
-                                                    key={getSolutionKey(individual)}
-                                                    onClick={() => setSelectedIndividual(individual)}
-                                                    className={`cursor-pointer hover:bg-yellow-500/10 ${isSelected ? 'bg-yellow-500/10 text-yellow-300' : ''}`}
-                                                >
-                                                    <td className="p-2 text-yellow-400 font-bold">
-                                                        {individual.fitness.toFixed(1)}%
-                                                    </td>
-
-                                                    <td className="p-2">
-                                                        {individual.totalCost.toLocaleString()} Ar
-                                                    </td>
-
-                                                    <td className="p-2 text-right flex justify-end gap-1">
-                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
-                                                            <span key={`${getSolutionKey(individual)}-${type}`} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
-                                                                {count}{type[0]}
-                                                            </span>
-                                                        ))}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-
-                        <div className="mt-6">
-                            <h3 className="text-[10px] font-bold text-blue-400 uppercase mb-2">
-                                Ranking Global (Score Multi-Objectif)
-                            </h3>
-
-                            <div className="bg-slate-950/50 border border-blue-500/20 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
-                                <table className="w-full text-[10px] font-mono">
-                                    <tbody>
-                                        {globalRanking.map((individual, index) => {
-                                            const isSelected = selectedIndividual === individual;
-
-                                            return (
-                                                <tr
-                                                    key={getSolutionKey(individual)}
-                                                    onClick={() => setSelectedIndividual(individual)}
-                                                    className={`cursor-pointer hover:bg-blue-500/10 ${isSelected ? 'bg-blue-500/10 text-blue-300' : ''}`}
-                                                >
-                                                    <td className="p-2 text-blue-400">#{index + 1}</td>
-                                                    <td className="p-2">{individual.fitness.toFixed(1)}%</td>
-                                                    <td className="p-2">{individual.totalCost.toLocaleString()} Ar</td>
-                                                    <td className="p-2 text-right flex justify-end gap-1">
-                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
-                                                            <span key={`${getSolutionKey(individual)}-${type}`} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
-                                                                {count}{type[0]}
-                                                            </span>
-                                                        ))}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </div>
-                    </div>
+                    <button
+                        onClick={() => setIsRunning(!isRunning)}
+                        className={`w-full rounded-2xl px-4 py-4 text-sm font-black tracking-[0.22em] transition-colors ${isRunning
+                            ? 'border border-red-500/40 bg-red-500/15 text-red-300 hover:bg-red-500/25'
+                            : 'bg-emerald-500 text-slate-950 hover:bg-emerald-400'
+                            }`}
+                    >
+                        {isRunning ? "ARRETER L'OPTIMISATION" : "LANCER L'OPTIMISATION"}
+                    </button>
                 </div>
             </aside>
 
-            <main ref={containerRef} className="flex-1 min-w-0 flex items-center justify-center p-8 bg-[radial-gradient(#1e293b_1px,transparent_1px)] bg-size-[20px_20px]">
-                <div className="relative rounded-2xl border-4 border-slate-800 bg-slate-900 overflow-hidden shadow-[0_0_80px_-15px_rgba(0,0,0,0.6)]"
-                    style={{ width: config.areaWidth * dynamicScale, height: config.areaHeight * dynamicScale }}>
-                    <canvas ref={canvasRef} width={config.areaWidth * dynamicScale} height={config.areaHeight * dynamicScale} />
-                    <div className="absolute top-4 left-4 flex flex-col gap-1">
-                        <div className="px-3 py-1 bg-slate-950/90 backdrop-blur rounded-lg border border-white/10 shadow-xl">
-                            <span className="text-[10px] font-mono text-slate-500">{config.areaWidth}m x {config.areaHeight}m</span>
+            <main className="flex-1 min-w-0 overflow-y-auto p-6 custom-scrollbar">
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
+                    <section className="rounded-[28px] border border-slate-800 bg-slate-900/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h2 className="text-lg font-bold text-white">Carte de deploiement</h2>
+                                <p className="text-sm text-slate-400">
+                                    {displayTarget ? `Affichage de ${formatCost(displayTarget.totalCost)} pour ${displayTarget.sensors.length} capteur(s).` : "Aucune solution affichee."}
+                                </p>
+                            </div>
+
+                            <div className="rounded-xl border border-slate-800 bg-slate-950/90 px-3 py-2 text-right">
+                                <div className="text-xs uppercase tracking-[0.22em] text-slate-500">Zone</div>
+                                <div className="text-sm font-mono text-slate-200">
+                                    {config.areaWidth}m x {config.areaHeight}m
+                                </div>
+                            </div>
                         </div>
-                        <div className={`px-3 py-1 bg-slate-950/90 backdrop-blur rounded-lg border border-white/10 shadow-xl text-[10px] font-bold uppercase ${selectedIndividual ? 'text-blue-400' : 'text-emerald-500'}`}>
-                            {selectedIndividual ? "Consultation Alternative" : "Simulation Active"}
+
+                        <div className="mt-4 rounded-[24px] border border-slate-800 bg-[radial-gradient(#1e293b_1px,transparent_1px)] bg-size-[20px_20px] p-4">
+                            <div
+                                ref={containerRef}
+                                className="flex min-h-[420px] items-center justify-center overflow-hidden rounded-[20px] border border-slate-800 bg-slate-950"
+                            >
+                                <div
+                                    className="relative overflow-hidden rounded-[20px] border-4 border-slate-800 bg-slate-900"
+                                    style={{
+                                        width: config.areaWidth * dynamicScale,
+                                        height: config.areaHeight * dynamicScale,
+                                    }}
+                                >
+                                    <canvas
+                                        ref={canvasRef}
+                                        width={config.areaWidth * dynamicScale}
+                                        height={config.areaHeight * dynamicScale}
+                                    />
+
+                                    <div className="absolute left-4 top-4 space-y-2">
+                                        <div className="rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-xs text-slate-300">
+                                            {recommendedSolution
+                                                ? `Solution recommandee: ${recommendedSolution.label}`
+                                                : "Simulation active"}
+                                        </div>
+                                        {displayTarget && (
+                                            <div className="rounded-xl border border-white/10 bg-slate-950/90 px-3 py-2 text-xs text-slate-400">
+                                                Couverture: {formatPercent(displayTarget.fitness)}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
                         </div>
+                    </section>
+
+                    <div className="space-y-6">
+                        <RecommendationPanel
+                            analysis={decisionAnalysis}
+                            recommendedSolution={recommendedSolution}
+                            baselineRecommended={baselineRecommended}
+                            onFocusRecommended={() => {
+                                if (recommendedSolution) {
+                                    setSelectedSolutionId(recommendedSolution.solutionID);
+                                    setSelectedSolutionKey(getIndividualKey(recommendedSolution.individual));
+                                }
+                            }}
+                            onExportCSV={handleExportCSV}
+                            onExportJSON={handleExportJSON}
+                        />
+
+                        <SensitivityPanel summary={sensitivitySummary} />
+
+                        <ComparisonPanel
+                            solutions={comparisonSolutions}
+                            onFocusSolution={(solution) => {
+                                setSelectedSolutionId(solution.solutionID);
+                                setSelectedSolutionKey(getIndividualKey(solution.individual));
+                            }}
+                            onRemoveSolution={(solutionID) => {
+                                setComparisonIds(current => current.filter(id => id !== solutionID));
+                            }}
+                        />
                     </div>
                 </div>
+
+                <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,0.95fr)_minmax(320px,0.55fr)]">
+                    <section className="rounded-[28px] border border-slate-800 bg-slate-900/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h2 className="text-lg font-bold text-white">Front de Pareto</h2>
+                                <p className="text-sm text-slate-400">
+                                    La recommandation ADOMC reste superposee au front existant.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-4">
+                            <ParetoChart
+                                population={population}
+                                selectedSolutionKey={selectedSolutionKey}
+                                recommendedSolutionKey={recommendedSolutionKey}
+                            />
+                        </div>
+                    </section>
+
+                    <section className="rounded-[28px] border border-slate-800 bg-slate-900/70 p-4">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h2 className="text-lg font-bold text-white">Pareto shortlist</h2>
+                                <p className="text-sm text-slate-400">
+                                    Solutions non dominees pour continuer a justifier la decision.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 max-h-[360px] overflow-y-auto custom-scrollbar">
+                            <table className="w-full text-left text-sm">
+                                <thead className="sticky top-0 bg-slate-900/95 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+                                    <tr>
+                                        <th className="px-3 py-2">Couverture</th>
+                                        <th className="px-3 py-2">Cout</th>
+                                        <th className="px-3 py-2 text-right">Materiel</th>
+                                    </tr>
+                                </thead>
+                                <tbody className="divide-y divide-slate-800">
+                                    {paretoShortlist.map(individual => {
+                                        const solutionKey = getIndividualKey(individual);
+                                        const isSelected = selectedSolutionKey === solutionKey;
+
+                                        return (
+                                            <tr
+                                                key={solutionKey}
+                                                onClick={() => setSelectedSolutionKey(solutionKey)}
+                                                className={`cursor-pointer transition-colors ${isSelected ? 'bg-emerald-500/10 text-emerald-200' : 'hover:bg-slate-800/60'}`}
+                                            >
+                                                <td className="px-3 py-3 font-semibold">{formatPercent(individual.fitness)}</td>
+                                                <td className="px-3 py-3">{formatCost(individual.totalCost)}</td>
+                                                <td className="px-3 py-3 text-right">
+                                                    <div className="flex justify-end gap-1">
+                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
+                                                            <span key={`${solutionKey}-${type}`} className="rounded bg-slate-950 px-2 py-1 text-[10px] text-slate-300">
+                                                                {count}{type[0]}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })}
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+                </div>
+
+                <section className="mt-6 rounded-[28px] border border-slate-800 bg-slate-900/70 p-4">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-lg font-bold text-white">Classement multicritere</h2>
+                            <p className="text-sm text-slate-400">
+                                Classement TOPSIS avec baseline somme ponderee, triable et selectionnable.
+                            </p>
+                        </div>
+
+                        {decisionAnalysis && (
+                            <div className="rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-right">
+                                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Candidats</div>
+                                <div className="text-sm font-semibold text-slate-200">{decisionAnalysis.rankedSolutions.length}</div>
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="mt-4">
+                        <DecisionRankingTable
+                            solutions={sortedRankedSolutions}
+                            selectedSolutionId={selectedSolutionId}
+                            comparisonIds={comparisonIds}
+                            sortConfig={sortConfig}
+                            onSortChange={handleSortChange}
+                            onSelectSolution={handleSelectRankedSolution}
+                            onToggleComparison={toggleComparison}
+                        />
+                    </div>
+                </section>
             </main>
         </div>
     );
