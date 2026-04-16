@@ -10,6 +10,8 @@ export function GetAllSolutions():Promise<Array<main.Individual>>;
 
 export function GetCatalog():Promise<Array<main.Sensor>>;
 
+export function GetConfig():Promise<main.Config>;
+
 export function GetOptimalSolutions(arg1:number):Promise<Array<main.Individual>>;
 
 export function InitPopulation():Promise<void>;

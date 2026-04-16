@@ -1,5 +1,4 @@
 import {
-    ScatterChart,
     Scatter,
     XAxis,
     YAxis,
@@ -59,7 +58,9 @@ export default function ParetoChart({ population }: Props) {
         density: computeDensity(p),
     }));
 
-    const maxDensity = Math.max(...enrichedData.map(p => p.density));
+    const maxDensity = enrichedData.length > 0
+        ? Math.max(...enrichedData.map(p => p.density))
+        : 1;
 
     const formatCost = (v: number) => `${v.toLocaleString()} Ar`;
 

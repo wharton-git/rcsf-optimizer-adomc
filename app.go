@@ -47,20 +47,33 @@ type App struct {
 	points []Individual
 }
 
+const (
+	defaultAreaWidth         = 80.0
+	defaultAreaHeight        = 60.0
+	defaultPopulation        = 50
+	defaultMaxBudget         = 2000000.0
+	solutionCostTolerance    = 50000.0
+	solutionFitnessTolerance = 0.2
+)
+
 var SensorCatalog = []Sensor{
 	{Type: "Eco-A", Range: 15, Cost: 45000},
 	{Type: "Standard-B", Range: 50, Cost: 180000},
 	{Type: "Premium-C", Range: 120, Cost: 650000},
 }
 
+func defaultConfig() Config {
+	return Config{
+		AreaWidth:  defaultAreaWidth,
+		AreaHeight: defaultAreaHeight,
+		Population: defaultPopulation,
+		MaxBudget:  defaultMaxBudget,
+	}
+}
+
 func NewApp() *App {
 	return &App{
-		config: Config{
-			AreaWidth:  80,
-			AreaHeight: 60,
-			Population: 50,
-			MaxBudget:  2000000,
-		},
+		config: defaultConfig(),
 	}
 }
 
@@ -284,6 +297,102 @@ func (a *App) computeCoverage(sensors []Sensor) float64 {
 	return float64(covered) / float64(total) * 100
 }
 
+func compareByFitnessDescCostAsc(left, right Individual) bool {
+	if math.Abs(left.Fitness-right.Fitness) > 1e-9 {
+		return left.Fitness > right.Fitness
+	}
+
+	if math.Abs(left.TotalCost-right.TotalCost) > 1e-9 {
+		return left.TotalCost < right.TotalCost
+	}
+
+	if len(left.Sensors) != len(right.Sensors) {
+		return len(left.Sensors) < len(right.Sensors)
+	}
+
+	return solutionMaterialKey(left) < solutionMaterialKey(right)
+}
+
+func scoreOf(ind Individual) float64 {
+	if ind.TotalCost <= 0 {
+		return 0
+	}
+
+	return ind.Fitness / (ind.TotalCost + 1)
+}
+
+func compareByScoreDesc(left, right Individual) bool {
+	leftScore := scoreOf(left)
+	rightScore := scoreOf(right)
+
+	if math.Abs(leftScore-rightScore) > 1e-12 {
+		return leftScore > rightScore
+	}
+
+	return compareByFitnessDescCostAsc(left, right)
+}
+
+func solutionMaterialKey(ind Individual) string {
+	counts := map[string]int{}
+
+	for _, s := range ind.Sensors {
+		counts[s.Type]++
+	}
+
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	signature := ""
+	for _, key := range keys {
+		signature += fmt.Sprintf("%s:%d|", key, counts[key])
+	}
+
+	return signature
+}
+
+func areSimilarSolutions(left, right Individual) bool {
+	if len(left.Sensors) != len(right.Sensors) {
+		return false
+	}
+
+	if solutionMaterialKey(left) != solutionMaterialKey(right) {
+		return false
+	}
+
+	return math.Abs(left.TotalCost-right.TotalCost) <= solutionCostTolerance &&
+		math.Abs(left.Fitness-right.Fitness) <= solutionFitnessTolerance
+}
+
+func containsSimilarSolution(selected []Individual, candidate Individual) bool {
+	for _, current := range selected {
+		if areSimilarSolutions(current, candidate) {
+			return true
+		}
+	}
+
+	return false
+}
+
+func filterDistinctSolutions(candidates []Individual, limit int) []Individual {
+	selected := make([]Individual, 0, len(candidates))
+
+	for _, candidate := range candidates {
+		if containsSimilarSolution(selected, candidate) {
+			continue
+		}
+
+		selected = append(selected, candidate)
+		if limit > 0 && len(selected) >= limit {
+			break
+		}
+	}
+
+	return selected
+}
+
 /* ===========================
    PSO + GA HYBRID
 =========================== */
@@ -400,19 +509,25 @@ func (a *App) UpdateParetoFront() {
 		}
 	}
 
-	seen := map[string]bool{}
-
+	paretoIndexes := make([]int, 0, len(a.points))
 	for i := range a.points {
-		if !a.points[i].IsPareto {
+		if a.points[i].IsPareto {
+			paretoIndexes = append(paretoIndexes, i)
+		}
+	}
+
+	sort.SliceStable(paretoIndexes, func(i, j int) bool {
+		return compareByFitnessDescCostAsc(a.points[paretoIndexes[i]], a.points[paretoIndexes[j]])
+	})
+
+	selected := make([]Individual, 0, len(paretoIndexes))
+	for _, idx := range paretoIndexes {
+		if containsSimilarSolution(selected, a.points[idx]) {
+			a.points[idx].IsPareto = false
 			continue
 		}
 
-		sig := getSignature(a.points[i])
-		if seen[sig] {
-			a.points[i].IsPareto = false
-		} else {
-			seen[sig] = true
-		}
+		selected = append(selected, a.points[idx])
 	}
 }
 
@@ -421,29 +536,10 @@ func dominates(a1, a2 Individual) bool {
 		(a1.Fitness > a2.Fitness || a1.TotalCost < a2.TotalCost)
 }
 
-func getSignature(ind Individual) string {
-	counts := map[string]int{}
-
-	for _, s := range ind.Sensors {
-		counts[s.Type]++
-	}
-
-	sig := ""
-
-	for k, v := range counts {
-		sig += fmt.Sprintf("%s:%d|", k, v)
-	}
-
-	sig += fmt.Sprintf("C%.0f-F%.1f", ind.TotalCost, ind.Fitness)
-
-	return sig
-}
-
 /* ===========================
    OPTIMAL DIVERSIFIED (NEW)
 =========================== */
 
-// Dans app.go
 func (a *App) GetOptimalSolutions(limit int) []Individual {
 	pareto := []Individual{}
 	for _, ind := range a.points {
@@ -452,51 +548,20 @@ func (a *App) GetOptimalSolutions(limit int) []Individual {
 		}
 	}
 
-	// Trier par efficacité (Fitness / Coût)
 	sort.Slice(pareto, func(i, j int) bool {
-		return (pareto[i].Fitness / (pareto[i].TotalCost + 1)) >
-			(pareto[j].Fitness / (pareto[j].TotalCost + 1))
+		return compareByScoreDesc(pareto[i], pareto[j])
 	})
 
-	selected := []Individual{}
-	for _, cand := range pareto {
-		isSimilar := false
-		for _, s := range selected {
-			// Filtrer si le coût est trop proche (ex: moins de 50 000 Ar d'écart)
-			// ET que la couverture est très proche
-			costDiff := math.Abs(cand.TotalCost - s.TotalCost)
-			fitDiff := math.Abs(cand.Fitness - s.Fitness)
-
-			if costDiff < 50000 && fitDiff < 0.5 {
-				isSimilar = true
-				break
-			}
-		}
-
-		if !isSimilar {
-			selected = append(selected, cand)
-		}
-		if len(selected) >= limit {
-			break
-		}
-	}
-	return selected
-}
-
-func dist(a, b Individual) float64 {
-	if len(a.Sensors) == 0 || len(b.Sensors) == 0 {
-		return 999999
-	}
-
-	dx := a.Sensors[0].X - b.Sensors[0].X
-	dy := a.Sensors[0].Y - b.Sensors[0].Y
-
-	return math.Sqrt(dx*dx + dy*dy)
+	return filterDistinctSolutions(pareto, limit)
 }
 
 func (a *App) SetConstraints(config Config) {
 	a.config = config
 	a.InitPopulation()
+}
+
+func (a *App) GetConfig() Config {
+	return a.config
 }
 
 func (a *App) UpdateCatalog(newCatalog []Sensor) {
@@ -510,12 +575,4 @@ func (a *App) GetCatalog() []Sensor {
 
 func (a *App) GetAllSolutions() []Individual {
 	return a.points
-}
-
-func (a *App) computeScore(ind Individual) float64 {
-	if ind.TotalCost <= 0 {
-		return 0
-	}
-
-	return ind.Fitness / (ind.TotalCost + 1)
 }

@@ -18,6 +18,10 @@ export function GetCatalog() {
   return window['go']['main']['App']['GetCatalog']();
 }
 
+export function GetConfig() {
+  return window['go']['main']['App']['GetConfig']();
+}
+
 export function GetOptimalSolutions(arg1) {
   return window['go']['main']['App']['GetOptimalSolutions'](arg1);
 }

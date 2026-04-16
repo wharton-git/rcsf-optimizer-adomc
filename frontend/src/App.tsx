@@ -1,7 +1,26 @@
-import { useState, useEffect, useRef } from 'react';
-import { Evolve, InitPopulation, SetConstraints, GetCatalog, UpdateCatalog, GetOptimalSolutions, GetAllSolutions } from "../wailsjs/go/main/App";
+import { useEffect, useRef, useState } from 'react';
+import {
+    Evolve,
+    GetAllSolutions,
+    GetCatalog,
+    GetConfig,
+    GetOptimalSolutions,
+    InitPopulation,
+    SetConstraints,
+    UpdateCatalog,
+} from "../wailsjs/go/main/App";
 import ParetoChart from './components/ParetoChart';
 import { main } from "../wailsjs/go/models";
+
+const DEFAULT_CONFIG: main.Config = {
+    areaWidth: 80,
+    areaHeight: 60,
+    population: 50,
+    maxBudget: 2000000,
+};
+
+const SOLUTION_COST_TOLERANCE = 50000;
+const SOLUTION_FITNESS_TOLERANCE = 0.2;
 
 const SENSOR_COLORS: Record<string, { bg: string, stroke: string, dot: string }> = {
     "Eco-A": { bg: 'rgba(34, 197, 94, 0.15)', stroke: 'rgba(34, 197, 94, 0.4)', dot: '#22c55e' },
@@ -11,8 +30,78 @@ const SENSOR_COLORS: Record<string, { bg: string, stroke: string, dot: string }>
 
 const formatMaterial = (sensors: main.Sensor[]) => {
     const counts: Record<string, number> = {};
-    sensors.forEach(s => counts[s.type] = (counts[s.type] || 0) + 1);
+    sensors.forEach(sensor => {
+        counts[sensor.type] = (counts[sensor.type] || 0) + 1;
+    });
     return counts;
+};
+
+const getMaterialSignature = (sensors: main.Sensor[]) => Object.entries(formatMaterial(sensors))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([type, count]) => `${type}:${count}`)
+    .join('|');
+
+const getSolutionKey = (individual: main.Individual) =>
+    `${Math.round(individual.totalCost)}-${individual.fitness.toFixed(3)}-${getMaterialSignature(individual.sensors)}`;
+
+const getSolutionScore = (individual: main.Individual) => individual.fitness / (individual.totalCost + 1);
+
+const areSolutionsSimilar = (left: main.Individual, right: main.Individual) => {
+    if (left.sensors.length !== right.sensors.length) {
+        return false;
+    }
+
+    if (getMaterialSignature(left.sensors) !== getMaterialSignature(right.sensors)) {
+        return false;
+    }
+
+    return Math.abs(left.totalCost - right.totalCost) <= SOLUTION_COST_TOLERANCE &&
+        Math.abs(left.fitness - right.fitness) <= SOLUTION_FITNESS_TOLERANCE;
+};
+
+const compareByFitnessThenCost = (left: main.Individual, right: main.Individual) => {
+    if (Math.abs(left.fitness - right.fitness) > Number.EPSILON) {
+        return right.fitness - left.fitness;
+    }
+
+    if (Math.abs(left.totalCost - right.totalCost) > Number.EPSILON) {
+        return left.totalCost - right.totalCost;
+    }
+
+    return left.sensors.length - right.sensors.length;
+};
+
+const compareByScoreThenFitness = (left: main.Individual, right: main.Individual) => {
+    const scoreDiff = getSolutionScore(right) - getSolutionScore(left);
+    if (Math.abs(scoreDiff) > Number.EPSILON) {
+        return scoreDiff;
+    }
+
+    return compareByFitnessThenCost(left, right);
+};
+
+const getDistinctSolutions = (
+    pool: main.Individual[],
+    limit: number,
+    compare: (left: main.Individual, right: main.Individual) => number,
+) => {
+    const unique: main.Individual[] = [];
+    const sorted = [...pool]
+        .filter(individual => individual.fitness > 0)
+        .sort(compare);
+
+    for (const candidate of sorted) {
+        if (unique.some(current => areSolutionsSimilar(current, candidate))) {
+            continue;
+        }
+
+        unique.push(candidate);
+        if (unique.length >= limit) {
+            break;
+        }
+    }
+
+    return unique;
 };
 
 function App() {
@@ -22,20 +111,52 @@ function App() {
     const [selectedIndividual, setSelectedIndividual] = useState<main.Individual | null>(null);
     const [optimalSolutions, setOptimalSolutions] = useState<main.Individual[]>([]);
     const [allSolutions, setAllSolutions] = useState<main.Individual[]>([]);
-    const [config, setConfig] = useState({
-        areaWidth: 80,
-        areaHeight: 60,
-        population: 50,
-        maxBudget: 1000000,
-    });
+    const [config, setConfig] = useState<main.Config>(DEFAULT_CONFIG);
 
     const [dynamicScale, setDynamicScale] = useState(10);
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
 
+    const syncPopulationSnapshot = async () => {
+        const solutions = await GetAllSolutions();
+        setPopulation(solutions);
+        setAllSolutions(solutions);
+    };
+
     useEffect(() => {
-        InitPopulation();
-        GetCatalog().then(setCatalog);
+        let active = true;
+
+        const bootstrap = async () => {
+            const backendConfig = await GetConfig();
+            if (!active) {
+                return;
+            }
+
+            setConfig(backendConfig);
+            await InitPopulation();
+            if (!active) {
+                return;
+            }
+
+            const [solutions, sensorCatalog] = await Promise.all([
+                GetAllSolutions(),
+                GetCatalog(),
+            ]);
+
+            if (!active) {
+                return;
+            }
+
+            setPopulation(solutions);
+            setAllSolutions(solutions);
+            setCatalog(sensorCatalog);
+        };
+
+        bootstrap().catch(console.error);
+
+        return () => {
+            active = false;
+        };
     }, []);
 
     useEffect(() => {
@@ -54,69 +175,74 @@ function App() {
     }, [config.areaWidth, config.areaHeight]);
 
     useEffect(() => {
-        const load = async () => {
-            const res = await GetOptimalSolutions(10);
-            setOptimalSolutions(res);
+        const loadOptimalSolutions = async () => {
+            const solutions = await GetOptimalSolutions(10);
+            setOptimalSolutions(getDistinctSolutions(solutions, 10, compareByScoreThenFitness));
         };
 
         if (population.length > 0) {
-            load();
+            loadOptimalSolutions().catch(console.error);
+            return;
         }
+
+        setOptimalSolutions([]);
     }, [population]);
 
-    useEffect(() => {
-        const loadAll = async () => {
-            const res = await GetAllSolutions();
-            setAllSolutions(res);
-        };
-
-        if (population.length > 0) {
-            loadAll();
-        }
-    }, [population]);
-
-    const handleConfigChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleConfigChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = e.target;
-        const newConfig = { ...config, [name]: Number(value) };
-        setConfig(newConfig);
+        const nextConfig = { ...config, [name]: Number(value) };
+        setConfig(nextConfig);
+        setSelectedIndividual(null);
 
-        console.log("Envoi au Backend :", {
-            areaWidth: Number(newConfig.areaWidth),
-            areaHeight: Number(newConfig.areaHeight),
-            population: Number(newConfig.population),
-            maxBudget: Number(newConfig.maxBudget)
-        });
-
-        SetConstraints({
-            areaWidth: Number(newConfig.areaWidth),
-            areaHeight: Number(newConfig.areaHeight),
-            population: Number(newConfig.population),
-            maxBudget: Number(newConfig.maxBudget)
-        } as main.Config);
+        try {
+            await SetConstraints(nextConfig as main.Config);
+            await syncPopulationSnapshot();
+        } catch (err) {
+            console.error(err);
+        }
     };
 
-    const handleCatalogUpdate = (index: number, field: string, value: number) => {
-        const newCatalog = [...catalog];
-        // @ts-ignore
-        newCatalog[index][field] = value;
-        setCatalog(newCatalog);
-        UpdateCatalog(newCatalog);
+    const handleCatalogUpdate = async (index: number, field: 'range' | 'cost', value: number) => {
+        const nextCatalog = catalog.map((item, itemIndex) => (
+            itemIndex === index ? { ...item, [field]: value } : item
+        ));
+
+        setCatalog(nextCatalog);
+        setSelectedIndividual(null);
+
+        try {
+            await UpdateCatalog(nextCatalog);
+            await syncPopulationSnapshot();
+        } catch (err) {
+            console.error(err);
+        }
     };
 
     useEffect(() => {
         let active = true;
+
         async function loop() {
             if (!isRunning || !active) return;
+
             try {
                 const nextGen = await Evolve();
                 if (active && isRunning) {
                     setPopulation(nextGen);
+                    setAllSolutions(nextGen);
                     setTimeout(loop, 10);
                 }
-            } catch (err) { console.error(err); }
+            } catch (err) {
+                console.error(err);
+            }
         }
-        if (isRunning) loop();
-        return () => { active = false; };
+
+        if (isRunning) {
+            loop();
+        }
+
+        return () => {
+            active = false;
+        };
     }, [isRunning]);
 
     useEffect(() => {
@@ -126,66 +252,40 @@ function App() {
         if (!ctx) return;
 
         ctx.clearRect(0, 0, config.areaWidth * dynamicScale, config.areaHeight * dynamicScale);
-        const displayTarget = selectedIndividual || population.find(p => p.isPareto) || population[0];
+        const displayTarget = selectedIndividual || population.find(point => point.isPareto) || population[0];
 
-        displayTarget?.sensors?.forEach(s => {
-            const colors = SENSOR_COLORS[s.type] || SENSOR_COLORS["Standard-B"];
+        displayTarget?.sensors?.forEach(sensor => {
+            const colors = SENSOR_COLORS[sensor.type] || SENSOR_COLORS["Standard-B"];
             ctx.beginPath();
-            ctx.arc(s.x * dynamicScale, s.y * dynamicScale, s.range * dynamicScale, 0, 2 * Math.PI);
+            ctx.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, sensor.range * dynamicScale, 0, 2 * Math.PI);
             ctx.fillStyle = colors.bg;
             ctx.fill();
             ctx.strokeStyle = colors.stroke;
             ctx.stroke();
             ctx.beginPath();
-            ctx.arc(s.x * dynamicScale, s.y * dynamicScale, 3, 0, 2 * Math.PI);
+            ctx.arc(sensor.x * dynamicScale, sensor.y * dynamicScale, 3, 0, 2 * Math.PI);
             ctx.fillStyle = colors.dot;
             ctx.fill();
         });
     }, [population, config, dynamicScale, selectedIndividual]);
 
-    const getSensorDetails = (sensors: main.Sensor[]) => {
-        const counts: Record<string, number> = {};
-        sensors.forEach(s => counts[s.type] = (counts[s.type] || 0) + 1);
-        return counts;
-    };
-
-    // Fonction de déduplication: supprime les solutions avec un coût trop similaire
-    const getUniqueSolutions = (pop: main.Individual[], limit: number) => {
-        const unique: main.Individual[] = [];
-
-        // Trier par fitness décroissant
-        const sorted = [...pop].filter(p => p.fitness > 0).sort((a, b) => b.fitness - a.fitness);
-
-        for (const ind of sorted) {
-            // Ignorer si une solution avec un coût similaire existe déjà (tolérance: 50000 Ar)
-            const isDuplicate = unique.some(u => Math.abs(u.totalCost - ind.totalCost) < 50000);
-            if (!isDuplicate) {
-                unique.push(ind);
-            }
-            if (unique.length >= limit) break;
-        }
-        return unique;
-    };
-
-    const paretoSolutions = getUniqueSolutions(
-        population.filter(p => p.isPareto),
-        10
+    const paretoSolutions = getDistinctSolutions(
+        population.filter(individual => individual.isPareto),
+        10,
+        compareByFitnessThenCost,
     );
 
-    const bestCompromises = getUniqueSolutions(
+    const bestCompromises = getDistinctSolutions(
         population,
-        10
+        10,
+        compareByFitnessThenCost,
     );
 
-    const globalRanking = allSolutions
-        .filter(p => p.fitness > 0)
-        .map(p => ({
-            individual: p,
-            score: p.fitness / (p.totalCost + 1)
-        }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 20);
-
+    const globalRanking = getDistinctSolutions(
+        allSolutions,
+        20,
+        compareByScoreThenFitness,
+    );
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-200 overflow-hidden font-sans">
@@ -220,7 +320,6 @@ function App() {
                             </div>
                         </div>
 
-                        {/* Catalogue */}
                         <div className="space-y-3 bg-slate-800/20 p-4 rounded-xl border border-slate-800/50">
                             <label className="text-[10px] text-slate-500 uppercase font-bold tracking-widest">Édition du Catalogue</label>
                             <div className="space-y-2">
@@ -247,16 +346,12 @@ function App() {
                             {isRunning ? "ARRÊTER L'OPTIMISATION" : "LANCER L'OPTIMISATION"}
                         </button>
 
-                        {/* Pareto */}
                         <div className="mt-auto">
                             <ParetoChart population={population} />
                         </div>
-
                     </div>
 
                     <div className="w-80 flex flex-col gap-6">
-
-                        {/* Tableau */}
                         <div className="space-y-3">
                             <div className="flex justify-between items-center px-1">
                                 <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Top 10 Pareto Solutions</h3>
@@ -274,33 +369,26 @@ function App() {
                                         </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-800/40 font-mono">
-                                        {paretoSolutions.map((ind, idx) => {
-                                            const counts = getSensorDetails(ind.sensors);
-
-                                            console.log("Pareto Solution : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
-
-                                            return (
-                                                <tr
-                                                    key={idx}
-                                                    onClick={() => setSelectedIndividual(ind)}
-                                                    className={`cursor-pointer transition-colors text-[10px] hover:bg-slate-800 ${selectedIndividual === ind ? 'bg-emerald-500/10 text-emerald-400' : ''
-                                                        }`}
-                                                >
-                                                    <td className="p-3 font-bold">{ind.fitness.toFixed(1)}%</td>
-                                                    <td className="p-3">{ind.totalCost.toLocaleString()}</td>
-                                                    <td className="p-3 text-right flex justify-end gap-1">
-                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
-                                                            <span
-                                                                key={t}
-                                                                className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
-                                                            >
-                                                                {c}{t[0]}
-                                                            </span>
-                                                        ))}
-                                                    </td>
-                                                </tr>
-                                            );
-                                        })}
+                                        {paretoSolutions.map((individual) => (
+                                            <tr
+                                                key={getSolutionKey(individual)}
+                                                onClick={() => setSelectedIndividual(individual)}
+                                                className={`cursor-pointer transition-colors text-[10px] hover:bg-slate-800 ${selectedIndividual === individual ? 'bg-emerald-500/10 text-emerald-400' : ''}`}
+                                            >
+                                                <td className="p-3 font-bold">{individual.fitness.toFixed(1)}%</td>
+                                                <td className="p-3">{individual.totalCost.toLocaleString()}</td>
+                                                <td className="p-3 text-right flex justify-end gap-1">
+                                                    {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
+                                                        <span
+                                                            key={`${getSolutionKey(individual)}-${type}`}
+                                                            className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
+                                                        >
+                                                            {count}{type[0]}
+                                                        </span>
+                                                    ))}
+                                                </td>
+                                            </tr>
+                                        ))}
                                     </tbody>
                                 </table>
                             </div>
@@ -314,38 +402,30 @@ function App() {
                             <div className="bg-slate-950/50 border border-emerald-500/20 rounded-xl overflow-hidden">
                                 <table className="w-full text-[10px] font-mono">
                                     <tbody>
-                                        {optimalSolutions.map((ind, i) => {
-                                            const counts = getSensorDetails(ind.sensors);
-
-                                            console.log("Optimal Solution : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
-
-                                            const isSelected = selectedIndividual === ind;
+                                        {optimalSolutions.map((individual) => {
+                                            const isSelected = selectedIndividual === individual;
 
                                             return (
                                                 <tr
-                                                    key={i}
-                                                    onClick={() => setSelectedIndividual(ind)}
-                                                    className={`
-                                                                    cursor-pointer transition-colors
-                                                                    hover:bg-emerald-500/10
-                                                                    ${isSelected ? 'bg-emerald-500/10 text-emerald-400' : ''}
-                                                                `}
+                                                    key={getSolutionKey(individual)}
+                                                    onClick={() => setSelectedIndividual(individual)}
+                                                    className={`cursor-pointer transition-colors hover:bg-emerald-500/10 ${isSelected ? 'bg-emerald-500/10 text-emerald-400' : ''}`}
                                                 >
                                                     <td className="p-2 text-emerald-400 font-bold">
-                                                        {ind.fitness.toFixed(1)}%
+                                                        {individual.fitness.toFixed(1)}%
                                                     </td>
 
                                                     <td className="p-2">
-                                                        {ind.totalCost.toLocaleString()} Ar
+                                                        {individual.totalCost.toLocaleString()} Ar
                                                     </td>
 
                                                     <td className="p-2 text-right">
-                                                        {Object.entries(counts).map(([t, c]) => (
+                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
                                                             <span
-                                                                key={t}
+                                                                key={`${getSolutionKey(individual)}-${type}`}
                                                                 className="ml-1 text-[8px] bg-slate-900 px-1 rounded"
                                                             >
-                                                                {c}{t[0]}
+                                                                {count}{type[0]}
                                                             </span>
                                                         ))}
                                                     </td>
@@ -365,32 +445,27 @@ function App() {
                             <div className="bg-slate-950/50 border border-yellow-500/20 rounded-xl overflow-hidden">
                                 <table className="w-full text-[10px] font-mono">
                                     <tbody>
-                                        {bestCompromises.map((ind, i) => {
-                                            const counts = getSensorDetails(ind.sensors);
-
-                                            console.log("Best Compromise : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
-
-                                            const isSelected = selectedIndividual === ind;
+                                        {bestCompromises.map((individual) => {
+                                            const isSelected = selectedIndividual === individual;
 
                                             return (
                                                 <tr
-                                                    key={i}
-                                                    onClick={() => setSelectedIndividual(ind)}
-                                                    className={`cursor-pointer hover:bg-yellow-500/10 ${isSelected ? 'bg-yellow-500/10 text-yellow-300' : ''
-                                                        }`}
+                                                    key={getSolutionKey(individual)}
+                                                    onClick={() => setSelectedIndividual(individual)}
+                                                    className={`cursor-pointer hover:bg-yellow-500/10 ${isSelected ? 'bg-yellow-500/10 text-yellow-300' : ''}`}
                                                 >
                                                     <td className="p-2 text-yellow-400 font-bold">
-                                                        {ind.fitness.toFixed(1)}%
+                                                        {individual.fitness.toFixed(1)}%
                                                     </td>
 
                                                     <td className="p-2">
-                                                        {ind.totalCost.toLocaleString()} Ar
+                                                        {individual.totalCost.toLocaleString()} Ar
                                                     </td>
 
                                                     <td className="p-2 text-right flex justify-end gap-1">
-                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
-                                                            <span className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
-                                                                {c}{t[0]}
+                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
+                                                            <span key={`${getSolutionKey(individual)}-${type}`} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                                {count}{type[0]}
                                                             </span>
                                                         ))}
                                                     </td>
@@ -410,26 +485,22 @@ function App() {
                             <div className="bg-slate-950/50 border border-blue-500/20 rounded-xl overflow-hidden max-h-64 overflow-y-auto">
                                 <table className="w-full text-[10px] font-mono">
                                     <tbody>
-                                        {globalRanking.map(({ individual: ind, score }, i) => {
-
-                                            console.log("Global Ranking : " + ind.fitness.toFixed(1) + " %, " + ind.totalCost.toLocaleString() + " Ar");
-
-                                            const isSelected = selectedIndividual === ind;
+                                        {globalRanking.map((individual, index) => {
+                                            const isSelected = selectedIndividual === individual;
 
                                             return (
                                                 <tr
-                                                    key={i}
-                                                    onClick={() => setSelectedIndividual(ind)}
-                                                    className={`cursor-pointer hover:bg-blue-500/10 ${isSelected ? 'bg-blue-500/10 text-blue-300' : ''
-                                                        }`}
+                                                    key={getSolutionKey(individual)}
+                                                    onClick={() => setSelectedIndividual(individual)}
+                                                    className={`cursor-pointer hover:bg-blue-500/10 ${isSelected ? 'bg-blue-500/10 text-blue-300' : ''}`}
                                                 >
-                                                    <td className="p-2 text-blue-400">#{i + 1}</td>
-                                                    <td className="p-2">{ind.fitness.toFixed(1)}%</td>
-                                                    <td className="p-2">{ind.totalCost.toLocaleString()} Ar</td>
+                                                    <td className="p-2 text-blue-400">#{index + 1}</td>
+                                                    <td className="p-2">{individual.fitness.toFixed(1)}%</td>
+                                                    <td className="p-2">{individual.totalCost.toLocaleString()} Ar</td>
                                                     <td className="p-2 text-right flex justify-end gap-1">
-                                                        {Object.entries(formatMaterial(ind.sensors)).map(([t, c]) => (
-                                                            <span className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
-                                                                {c}{t[0]}
+                                                        {Object.entries(formatMaterial(individual.sensors)).map(([type, count]) => (
+                                                            <span key={`${getSolutionKey(individual)}-${type}`} className="ml-1 text-[8px] bg-slate-900 px-1 rounded">
+                                                                {count}{type[0]}
                                                             </span>
                                                         ))}
                                                     </td>
@@ -440,7 +511,6 @@ function App() {
                                 </table>
                             </div>
                         </div>
-
                     </div>
                 </div>
             </aside>
