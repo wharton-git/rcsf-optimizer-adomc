@@ -2,13 +2,12 @@ import { useDeferredValue, useEffect, useRef, useState } from 'react';
 import {
     AnalyzeDecision,
     Evolve,
-    ExportDecisionCSV,
-    ExportDecisionJSON,
     GetAllSolutions,
     GetCatalog,
     GetConfig,
     GetDecisionCriteria,
     GetDecisionScenarios,
+    GetDiversityMetrics,
     GetOptimalSolutions,
     InitPopulation,
     SetConstraints,
@@ -62,7 +61,28 @@ const DEFAULT_SORT: DecisionSortConfig = {
     direction: 'asc',
 };
 
+const MANUAL_SCENARIO_ID = "manual";
 const PARETO_SHORTLIST_LIMIT = 10;
+
+const formatDecisionMethodLabel = (method: string | null | undefined) => {
+    if (method === "weighted_sum") {
+        return "Somme ponderee";
+    }
+
+    if (!method) {
+        return "TOPSIS";
+    }
+
+    return method.toUpperCase();
+};
+
+const formatCandidateSourceLabel = (candidateSource: string | null | undefined) => (
+    candidateSource === "valid" ? "Solutions valides" : "Pareto"
+);
+
+const formatCandidateCountLabel = (count: number) => (
+    count <= 1 ? `${count} candidat` : `${count} candidats`
+);
 
 const buildCatalogSummary = (sensors: main.Sensor[]) => sensors.map(sensor => ({
     id: sensor.id,
@@ -258,16 +278,6 @@ const sortRankedSolutions = (
     return sorted;
 };
 
-const downloadTextFile = (filename: string, content: string, mimeType: string) => {
-    const blob = new Blob([content], { type: mimeType });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(url);
-};
-
 const clampWeightValue = (value: number) => Math.min(1, Math.max(0, value));
 
 function App() {
@@ -276,6 +286,7 @@ function App() {
     const [catalog, setCatalog] = useState<main.Sensor[]>([]);
     const [config, setConfig] = useState<main.Config>(DEFAULT_CONFIG);
     const [paretoShortlist, setParetoShortlist] = useState<main.Individual[]>([]);
+    const [diversityMetrics, setDiversityMetrics] = useState<main.DiversityMetrics | null>(null);
 
     const [decisionCriteria, setDecisionCriteria] = useState<main.DecisionCriterion[]>([]);
     const [decisionScenarios, setDecisionScenarios] = useState<main.DecisionScenario[]>([]);
@@ -315,23 +326,32 @@ function App() {
             paretoShortlistLimit: PARETO_SHORTLIST_LIMIT,
         });
 
-        const [solutions, shortlist] = await Promise.all([
+        const [solutions, shortlist, metrics] = await Promise.all([
             GetAllSolutions(),
             GetOptimalSolutions(PARETO_SHORTLIST_LIMIT),
+            GetDiversityMetrics(),
         ]);
 
         logAlgorithmPayload("output", `${source}:RefreshSolutions`, {
             solutions,
             shortlist,
+            diversityMetrics: metrics,
         }, {
             population: buildPopulationSummary(solutions),
             paretoShortlist: buildPopulationSummary(shortlist),
+            diversityMetrics: {
+                generation: metrics.generation,
+                populationSize: metrics.populationSize,
+                paretoAfterDedup: metrics.paretoAfterDedup,
+                paretoBeforeDedup: metrics.paretoBeforeDedup,
+            },
         });
 
         setPopulation(solutions);
         setParetoShortlist(shortlist);
+        setDiversityMetrics(metrics);
 
-        return { solutions, shortlist };
+        return { solutions, shortlist, metrics };
     };
 
     useEffect(() => {
@@ -497,15 +517,24 @@ function App() {
                 });
 
                 const nextGeneration = await Evolve();
+                const metrics = await GetDiversityMetrics();
                 logAlgorithmPayload("output", `Evolve#${evolutionStep}`, {
                     population: nextGeneration,
+                    diversityMetrics: metrics,
                 }, {
                     population: buildPopulationSummary(nextGeneration),
+                    diversityMetrics: {
+                        generation: metrics.generation,
+                        populationSize: metrics.populationSize,
+                        paretoAfterDedup: metrics.paretoAfterDedup,
+                        paretoBeforeDedup: metrics.paretoBeforeDedup,
+                    },
                 });
 
                 if (active && isRunning) {
                     decisionChangedByWeightsRef.current = false;
                     setPopulation(nextGeneration);
+                    setDiversityMetrics(metrics);
                     setTimeout(loop, 25);
                 }
             } catch (error) {
@@ -786,24 +815,6 @@ function App() {
         });
     };
 
-    const handleExportCSV = async () => {
-        try {
-            const content = await ExportDecisionCSV(decisionRequest);
-            downloadTextFile("decision-analysis.csv", content, "text/csv;charset=utf-8");
-        } catch (error) {
-            console.error(error);
-        }
-    };
-
-    const handleExportJSON = async () => {
-        try {
-            const content = await ExportDecisionJSON(decisionRequest);
-            downloadTextFile("decision-analysis.json", content, "application/json;charset=utf-8");
-        } catch (error) {
-            console.error(error);
-        }
-    };
-
     const sortedRankedSolutions = sortRankedSolutions(
         decisionAnalysis?.rankedSolutions || [],
         sortConfig,
@@ -817,6 +828,52 @@ function App() {
         decisionAnalysis,
         decisionAnalysis?.weightedSumRecommendedSolutionID || "",
     );
+    const currentScenarioName = decisionAnalysis?.scenario?.name
+        || (decisionRequest.scenarioID === MANUAL_SCENARIO_ID
+            ? "Manuel"
+            : decisionScenarios.find(scenario => scenario.id === decisionRequest.scenarioID)?.name)
+        || "Scenario";
+    const currentMethodLabel = formatDecisionMethodLabel(
+        decisionAnalysis?.primaryMethod || decisionRequest.primaryMethod,
+    );
+    const currentCandidateSourceLabel = formatCandidateSourceLabel(
+        decisionAnalysis?.candidateSource || decisionRequest.candidateSource,
+    );
+    const currentCandidateCount = decisionAnalysis?.rankedSolutions.length || 0;
+    const rankingHeaderBadges = [
+        {
+            key: "generation",
+            label: `Generation ${diversityMetrics?.generation ?? 0}`,
+            className: "border-cyan-500/20 bg-cyan-500/10 text-cyan-200",
+        },
+        {
+            key: "evolution",
+            label: isRunning ? "Evolution active" : "Evolution arretee",
+            className: isRunning
+                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-200"
+                : "border-slate-700 bg-slate-950/80 text-slate-300",
+        },
+        {
+            key: "method",
+            label: currentMethodLabel,
+            className: "border-violet-500/20 bg-violet-500/10 text-violet-200",
+        },
+        {
+            key: "scenario",
+            label: currentScenarioName,
+            className: "border-amber-500/20 bg-amber-500/10 text-amber-100",
+        },
+        {
+            key: "source",
+            label: currentCandidateSourceLabel,
+            className: "border-sky-500/20 bg-sky-500/10 text-sky-200",
+        },
+        {
+            key: "candidates",
+            label: formatCandidateCountLabel(currentCandidateCount),
+            className: "border-slate-700 bg-slate-950/80 text-slate-200",
+        },
+    ];
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
@@ -824,7 +881,7 @@ function App() {
                 <div className="space-y-6">
                     <div>
                         <h1 className="text-3xl font-black tracking-tight text-white italic">
-                            RCSF<span className="text-emerald-400">.mg</span>
+                            RCSF
                         </h1>
                         <p className="mt-2 text-sm text-slate-400">
                             Optimisation hybride GA + PSO, enrichie par une couche ADOMC explicite.
@@ -1018,8 +1075,6 @@ function App() {
                                     selectDisplaySolution(recommendedSolution.individual, "recommendation-panel", recommendedSolution);
                                 }
                             }}
-                            onExportCSV={handleExportCSV}
-                            onExportJSON={handleExportJSON}
                         />
 
                         <SensitivityPanel summary={sensitivitySummary} />
@@ -1112,7 +1167,7 @@ function App() {
                 </div>
 
                 <section className="mt-6 rounded-[28px] border border-slate-800 bg-slate-900/70 p-4">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-col gap-3 xl:flex-row xl:items-start xl:justify-between">
                         <div>
                             <h2 className="text-lg font-bold text-white">Classement multicritere</h2>
                             <p className="text-sm text-slate-400">
@@ -1120,12 +1175,16 @@ function App() {
                             </p>
                         </div>
 
-                        {decisionAnalysis && (
-                            <div className="rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-2 text-right">
-                                <div className="text-[11px] uppercase tracking-[0.18em] text-slate-500">Candidats</div>
-                                <div className="text-sm font-semibold text-slate-200">{decisionAnalysis.rankedSolutions.length}</div>
-                            </div>
-                        )}
+                        <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+                            {rankingHeaderBadges.map(badge => (
+                                <div
+                                    key={badge.key}
+                                    className={`rounded-full border px-3 py-1.5 text-xs font-semibold ${badge.className}`}
+                                >
+                                    {badge.label}
+                                </div>
+                            ))}
+                        </div>
                     </div>
 
                     <div className="mt-4">
