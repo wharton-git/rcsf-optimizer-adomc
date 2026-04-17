@@ -268,6 +268,8 @@ const downloadTextFile = (filename: string, content: string, mimeType: string) =
     URL.revokeObjectURL(url);
 };
 
+const clampWeightValue = (value: number) => Math.min(1, Math.max(0, value));
+
 function App() {
     const [population, setPopulation] = useState<main.Individual[]>([]);
     const [isRunning, setIsRunning] = useState(false);
@@ -697,7 +699,7 @@ function App() {
             scenarioID: "manual",
             weights: {
                 ...decisionRequest.weights,
-                [key]: value,
+                [key]: clampWeightValue(value),
             },
         }));
     };
