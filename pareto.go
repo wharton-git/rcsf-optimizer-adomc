@@ -2,14 +2,19 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"math"
 	"sort"
 	"strings"
 )
 
 const (
-	solutionCostTolerance    = 50000.0
-	solutionFitnessTolerance = 0.2
+	strictSolutionCostTolerance      = 1.0
+	strictSolutionFitnessTolerance   = 0.02
+	readableSolutionCostTolerance    = 15000.0
+	readableSolutionFitnessTolerance = 0.1
+	similarLayoutPositionTolerance   = 3.0
+	strictLayoutPositionTolerance    = 0.25
 )
 
 func compareByFitnessDescCostAsc(left Individual, right Individual) bool {
@@ -67,14 +72,101 @@ func solutionMaterialKey(individual Individual) string {
 	return builder.String()
 }
 
+func sortedSensorsForComparison(sensors []Sensor) []Sensor {
+	sortedSensors := cloneSensors(sensors)
+	sort.SliceStable(sortedSensors, func(i int, j int) bool {
+		if sortedSensors[i].Type != sortedSensors[j].Type {
+			return sortedSensors[i].Type < sortedSensors[j].Type
+		}
+		if math.Abs(sortedSensors[i].Range-sortedSensors[j].Range) > 1e-9 {
+			return sortedSensors[i].Range < sortedSensors[j].Range
+		}
+		if math.Abs(sortedSensors[i].Cost-sortedSensors[j].Cost) > 1e-9 {
+			return sortedSensors[i].Cost < sortedSensors[j].Cost
+		}
+		if math.Abs(sortedSensors[i].X-sortedSensors[j].X) > 1e-9 {
+			return sortedSensors[i].X < sortedSensors[j].X
+		}
+		return sortedSensors[i].Y < sortedSensors[j].Y
+	})
+
+	return sortedSensors
+}
+
+func sensorsHaveSimilarLayout(left []Sensor, right []Sensor, positionTolerance float64) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	sortedLeft := sortedSensorsForComparison(left)
+	sortedRight := sortedSensorsForComparison(right)
+
+	for index := range sortedLeft {
+		if sortedLeft[index].Type != sortedRight[index].Type {
+			return false
+		}
+		if math.Abs(sortedLeft[index].Range-sortedRight[index].Range) > 1e-9 {
+			return false
+		}
+		if math.Abs(sortedLeft[index].Cost-sortedRight[index].Cost) > 1e-9 {
+			return false
+		}
+		if math.Abs(sortedLeft[index].X-sortedRight[index].X) > positionTolerance {
+			return false
+		}
+		if math.Abs(sortedLeft[index].Y-sortedRight[index].Y) > positionTolerance {
+			return false
+		}
+	}
+
+	return true
+}
+
+func solutionLayoutKey(individual Individual) string {
+	sortedSensors := sortedSensorsForComparison(individual.Sensors)
+	builder := strings.Builder{}
+
+	for _, sensor := range sortedSensors {
+		builder.WriteString(
+			fmt.Sprintf(
+				"%s@%.3f,%.3f,%.3f,%.0f|",
+				sensor.Type,
+				sensor.X,
+				sensor.Y,
+				sensor.Range,
+				sensor.Cost,
+			),
+		)
+	}
+
+	return builder.String()
+}
+
 func buildSolutionID(individual Individual) string {
 	replacer := strings.NewReplacer("|", "-", ":", "-", " ", "-", ".", "-")
+	hasher := fnv.New32a()
+	_, _ = hasher.Write([]byte(solutionLayoutKey(individual)))
 	return fmt.Sprintf(
-		"sol-%s-%.0f-%d",
+		"sol-%s-%.0f-%d-%08x",
 		replacer.Replace(solutionMaterialKey(individual)),
 		math.Round(individual.TotalCost),
 		int(math.Round(individual.Fitness*10)),
+		hasher.Sum32(),
 	)
+}
+
+func areStrictDuplicateSolutions(left Individual, right Individual) bool {
+	if len(left.Sensors) != len(right.Sensors) {
+		return false
+	}
+
+	if solutionMaterialKey(left) != solutionMaterialKey(right) {
+		return false
+	}
+
+	return math.Abs(left.TotalCost-right.TotalCost) <= strictSolutionCostTolerance &&
+		math.Abs(left.Fitness-right.Fitness) <= strictSolutionFitnessTolerance &&
+		sensorsHaveSimilarLayout(left.Sensors, right.Sensors, strictLayoutPositionTolerance)
 }
 
 func areSimilarSolutions(left Individual, right Individual) bool {
@@ -86,8 +178,19 @@ func areSimilarSolutions(left Individual, right Individual) bool {
 		return false
 	}
 
-	return math.Abs(left.TotalCost-right.TotalCost) <= solutionCostTolerance &&
-		math.Abs(left.Fitness-right.Fitness) <= solutionFitnessTolerance
+	return math.Abs(left.TotalCost-right.TotalCost) <= readableSolutionCostTolerance &&
+		math.Abs(left.Fitness-right.Fitness) <= readableSolutionFitnessTolerance &&
+		sensorsHaveSimilarLayout(left.Sensors, right.Sensors, similarLayoutPositionTolerance)
+}
+
+func containsStrictDuplicateSolution(selected []Individual, candidate Individual) bool {
+	for _, current := range selected {
+		if areStrictDuplicateSolutions(current, candidate) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func containsSimilarSolution(selected []Individual, candidate Individual) bool {
@@ -151,6 +254,7 @@ func (a *App) UpdateParetoFront() {
 			paretoIndexes = append(paretoIndexes, index)
 		}
 	}
+	paretoBeforeDedup := len(paretoIndexes)
 
 	sort.SliceStable(paretoIndexes, func(i int, j int) bool {
 		return compareByFitnessDescCostAsc(a.points[paretoIndexes[i]], a.points[paretoIndexes[j]])
@@ -158,11 +262,18 @@ func (a *App) UpdateParetoFront() {
 
 	selected := make([]Individual, 0, len(paretoIndexes))
 	for _, index := range paretoIndexes {
-		if containsSimilarSolution(selected, a.points[index]) {
+		if containsStrictDuplicateSolution(selected, a.points[index]) {
 			a.points[index].IsPareto = false
 			continue
 		}
 
 		selected = append(selected, a.points[index])
 	}
+
+	a.lastDiversityMetrics = buildDiversityMetrics(
+		a.generation,
+		a.points,
+		paretoBeforeDedup,
+		len(selected),
+	)
 }

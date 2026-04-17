@@ -129,3 +129,17 @@ type DecisionAnalysis struct {
 	RecommendedExplanation           string              `json:"recommendedExplanation"`
 	Summary                          string              `json:"summary"`
 }
+
+type DiversityMetrics struct {
+	Generation                 int         `json:"generation"`
+	PopulationSize             int         `json:"populationSize"`
+	SensorCountDistribution    map[int]int `json:"sensorCountDistribution"`
+	DistinctSensorCounts       int         `json:"distinctSensorCounts"`
+	DistinctMaterialSignatures int         `json:"distinctMaterialSignatures"`
+	DistinctStructuralFamilies int         `json:"distinctStructuralFamilies"`
+	ParetoBeforeDedup          int         `json:"paretoBeforeDedup"`
+	ParetoAfterDedup           int         `json:"paretoAfterDedup"`
+	AverageSensorCount         float64     `json:"averageSensorCount"`
+	AverageSensorCountGap      float64     `json:"averageSensorCountGap"`
+	Summary                    string      `json:"summary"`
+}

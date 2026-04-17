@@ -6,9 +6,11 @@ import (
 )
 
 type App struct {
-	ctx    context.Context
-	config Config
-	points []Individual
+	ctx                  context.Context
+	config               Config
+	points               []Individual
+	generation           int
+	lastDiversityMetrics DiversityMetrics
 }
 
 var defaultSensorCatalog = []Sensor{
@@ -230,6 +232,10 @@ func (a *App) GetDecisionScenarios() []DecisionScenario {
 
 func (a *App) GetDecisionCriteria() []DecisionCriterion {
 	return getDecisionCriteria()
+}
+
+func (a *App) GetDiversityMetrics() DiversityMetrics {
+	return a.lastDiversityMetrics
 }
 
 func (a *App) AnalyzeDecision(request DecisionRequest) DecisionAnalysis {

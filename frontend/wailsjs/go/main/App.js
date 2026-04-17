@@ -42,6 +42,10 @@ export function GetDecisionScenarios() {
   return window['go']['main']['App']['GetDecisionScenarios']();
 }
 
+export function GetDiversityMetrics() {
+  return window['go']['main']['App']['GetDiversityMetrics']();
+}
+
 export function GetOptimalSolutions(arg1) {
   return window['go']['main']['App']['GetOptimalSolutions'](arg1);
 }

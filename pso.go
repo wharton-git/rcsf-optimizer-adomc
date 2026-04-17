@@ -15,10 +15,6 @@ const (
 
 func (a *App) UpdatePositions(individual *Individual, globalBest []Sensor) {
 	for index := range individual.Sensors {
-		if index >= len(globalBest) || index >= len(individual.PBest) {
-			break
-		}
-
 		randomCognitive := rand.Float64()
 		randomSocial := rand.Float64()
 
@@ -39,17 +35,37 @@ func (a *App) UpdatePositions(individual *Individual, globalBest []Sensor) {
 			}
 		}
 
+		cognitiveX, cognitiveY := 0.0, 0.0
+		if index < len(individual.PBest) {
+			cognitiveX = psoCognitiveWeight * randomCognitive * (individual.PBest[index].X - individual.Sensors[index].X)
+			cognitiveY = psoCognitiveWeight * randomCognitive * (individual.PBest[index].Y - individual.Sensors[index].Y)
+		}
+
+		socialX, socialY := 0.0, 0.0
+		if index < len(globalBest) {
+			socialX = psoSocialWeight * randomSocial * (globalBest[index].X - individual.Sensors[index].X)
+			socialY = psoSocialWeight * randomSocial * (globalBest[index].Y - individual.Sensors[index].Y)
+		}
+
+		explorationX, explorationY := 0.0, 0.0
+		if index >= len(globalBest) || index >= len(individual.PBest) {
+			explorationX = rand.Float64()*2*initialVelocityAmplitude - initialVelocityAmplitude
+			explorationY = rand.Float64()*2*initialVelocityAmplitude - initialVelocityAmplitude
+		}
+
 		individual.Velocity[index].VX =
 			psoInertiaWeight*individual.Velocity[index].VX +
-				psoCognitiveWeight*randomCognitive*(individual.PBest[index].X-individual.Sensors[index].X) +
-				psoSocialWeight*randomSocial*(globalBest[index].X-individual.Sensors[index].X) +
-				repulsionX
+				cognitiveX +
+				socialX +
+				repulsionX +
+				explorationX
 
 		individual.Velocity[index].VY =
 			psoInertiaWeight*individual.Velocity[index].VY +
-				psoCognitiveWeight*randomCognitive*(individual.PBest[index].Y-individual.Sensors[index].Y) +
-				psoSocialWeight*randomSocial*(globalBest[index].Y-individual.Sensors[index].Y) +
-				repulsionY
+				cognitiveY +
+				socialY +
+				repulsionY +
+				explorationY
 
 		nextX := math.Max(0, math.Min(a.config.AreaWidth, individual.Sensors[index].X+individual.Velocity[index].VX))
 		nextY := math.Max(0, math.Min(a.config.AreaHeight, individual.Sensors[index].Y+individual.Velocity[index].VY))

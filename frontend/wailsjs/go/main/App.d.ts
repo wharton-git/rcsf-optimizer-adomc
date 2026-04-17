@@ -22,6 +22,8 @@ export function GetDecisionCriteria():Promise<Array<main.DecisionCriterion>>;
 
 export function GetDecisionScenarios():Promise<Array<main.DecisionScenario>>;
 
+export function GetDiversityMetrics():Promise<main.DiversityMetrics>;
+
 export function GetOptimalSolutions(arg1:number):Promise<Array<main.Individual>>;
 
 export function InitPopulation():Promise<void>;

@@ -405,6 +405,38 @@ export namespace main {
 	}
 	
 	
+	export class DiversityMetrics {
+	    generation: number;
+	    populationSize: number;
+	    sensorCountDistribution: Record<number, number>;
+	    distinctSensorCounts: number;
+	    distinctMaterialSignatures: number;
+	    distinctStructuralFamilies: number;
+	    paretoBeforeDedup: number;
+	    paretoAfterDedup: number;
+	    averageSensorCount: number;
+	    averageSensorCountGap: number;
+	    summary: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new DiversityMetrics(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.generation = source["generation"];
+	        this.populationSize = source["populationSize"];
+	        this.sensorCountDistribution = source["sensorCountDistribution"];
+	        this.distinctSensorCounts = source["distinctSensorCounts"];
+	        this.distinctMaterialSignatures = source["distinctMaterialSignatures"];
+	        this.distinctStructuralFamilies = source["distinctStructuralFamilies"];
+	        this.paretoBeforeDedup = source["paretoBeforeDedup"];
+	        this.paretoAfterDedup = source["paretoAfterDedup"];
+	        this.averageSensorCount = source["averageSensorCount"];
+	        this.averageSensorCountGap = source["averageSensorCountGap"];
+	        this.summary = source["summary"];
+	    }
+	}
 	
 	
 	
