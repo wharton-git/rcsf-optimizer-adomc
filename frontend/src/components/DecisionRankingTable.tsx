@@ -50,7 +50,7 @@ export default function DecisionRankingTable({
 }: Props) {
     return (
         <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
+            <table className="w-full min-w-245 text-left text-sm">
                 <thead className="bg-slate-900/90 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                     <tr>
                         {headers.map(header => (

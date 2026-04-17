@@ -62,6 +62,116 @@ const DEFAULT_SORT: DecisionSortConfig = {
     direction: 'asc',
 };
 
+const PARETO_SHORTLIST_LIMIT = 10;
+
+const buildCatalogSummary = (sensors: main.Sensor[]) => sensors.map(sensor => ({
+    id: sensor.id,
+    type: sensor.type,
+    range: sensor.range,
+    cost: sensor.cost,
+}));
+
+const buildIndividualSummary = (individual: main.Individual | null | undefined) => {
+    if (!individual) {
+        return null;
+    }
+
+    return {
+        key: getIndividualKey(individual),
+        coverage: individual.fitness,
+        cost: individual.totalCost,
+        sensorCount: individual.sensors.length,
+        paretoStatus: individual.isPareto,
+        material: formatMaterial(individual.sensors),
+    };
+};
+
+const buildPopulationSummary = (individuals: main.Individual[]) => {
+    if (individuals.length === 0) {
+        return {
+            count: 0,
+            paretoCount: 0,
+            bestCoverage: null,
+            lowestCost: null,
+            sample: [],
+        };
+    }
+
+    const bestCoverage = individuals.reduce((best, current) => (
+        current.fitness > best.fitness ? current : best
+    ), individuals[0]);
+
+    const lowestCost = individuals.reduce((best, current) => (
+        current.totalCost < best.totalCost ? current : best
+    ), individuals[0]);
+
+    return {
+        count: individuals.length,
+        paretoCount: individuals.filter(individual => individual.isPareto).length,
+        bestCoverage: buildIndividualSummary(bestCoverage),
+        lowestCost: buildIndividualSummary(lowestCost),
+        sample: individuals.slice(0, 3).map(buildIndividualSummary),
+    };
+};
+
+const buildRankedSolutionSummary = (solution: main.RankedSolution | null | undefined) => {
+    if (!solution) {
+        return null;
+    }
+
+    return {
+        solutionID: solution.solutionID,
+        label: solution.label,
+        rank: solution.rank,
+        topsisScore: solution.topsisScore,
+        weightedSumScore: solution.weightedSumScore,
+        paretoStatus: solution.paretoStatus,
+        coverage: solution.metrics.coverage,
+        cost: solution.metrics.cost,
+        overlap: solution.metrics.overlap,
+        sensorCount: solution.metrics.sensorCount,
+        robustness: solution.metrics.robustness,
+        key: getIndividualKey(solution.individual),
+    };
+};
+
+const buildDecisionAnalysisSummary = (analysis: main.DecisionAnalysis | null) => {
+    if (!analysis) {
+        return null;
+    }
+
+    return {
+        scenarioID: analysis.scenario?.id || null,
+        scenarioName: analysis.scenario?.name || null,
+        candidateSource: analysis.candidateSource,
+        primaryMethod: analysis.primaryMethod,
+        baselineMethod: analysis.baselineMethod,
+        rankedCount: analysis.rankedSolutions.length,
+        recommendedSolution: buildRankedSolutionSummary(
+            getRankedSolutionById(analysis, analysis.recommendedSolutionID),
+        ),
+        weightedSumRecommendedSolution: buildRankedSolutionSummary(
+            getRankedSolutionById(analysis, analysis.weightedSumRecommendedSolutionID),
+        ),
+        topSolutions: analysis.rankedSolutions.slice(0, 3).map(buildRankedSolutionSummary),
+        summary: analysis.summary,
+    };
+};
+
+const logAlgorithmPayload = (
+    stage: 'input' | 'output',
+    operation: string,
+    payload: unknown,
+    summary?: unknown,
+) => {
+    console.groupCollapsed(`[algorithm][${operation}][${stage}]`);
+    if (summary !== undefined) {
+        console.log("summary", summary);
+    }
+    console.log("payload", payload);
+    console.groupEnd();
+};
+
 const buildSensitivitySummary = (
     previousAnalysis: main.DecisionAnalysis | null,
     nextAnalysis: main.DecisionAnalysis | null,
@@ -182,17 +292,40 @@ function App() {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastAnalysisRef = useRef<main.DecisionAnalysis | null>(null);
     const decisionChangedByWeightsRef = useRef(false);
+    const evolutionStepRef = useRef(0);
+    const analysisRunRef = useRef(0);
+    const populationRef = useRef<main.Individual[]>([]);
+    const configRef = useRef<main.Config>(DEFAULT_CONFIG);
+    const catalogRef = useRef<main.Sensor[]>([]);
 
     const deferredPopulation = useDeferredValue(population);
 
-    const refreshSolutionsFromBackend = async () => {
+    populationRef.current = population;
+    configRef.current = config;
+    catalogRef.current = catalog;
+
+    const refreshSolutionsFromBackend = async (source: string) => {
+        logAlgorithmPayload("input", `${source}:RefreshSolutions`, {
+            paretoShortlistLimit: PARETO_SHORTLIST_LIMIT,
+        });
+
         const [solutions, shortlist] = await Promise.all([
             GetAllSolutions(),
-            GetOptimalSolutions(10),
+            GetOptimalSolutions(PARETO_SHORTLIST_LIMIT),
         ]);
+
+        logAlgorithmPayload("output", `${source}:RefreshSolutions`, {
+            solutions,
+            shortlist,
+        }, {
+            population: buildPopulationSummary(solutions),
+            paretoShortlist: buildPopulationSummary(shortlist),
+        });
 
         setPopulation(solutions);
         setParetoShortlist(shortlist);
+
+        return { solutions, shortlist };
     };
 
     useEffect(() => {
@@ -223,12 +356,21 @@ function App() {
                 weights: balancedScenario?.weights || DEFAULT_WEIGHTS,
             }));
 
+            logAlgorithmPayload("input", "InitPopulation", {
+                config: backendConfig,
+                catalog: sensorCatalog,
+            }, {
+                config: backendConfig,
+                catalog: buildCatalogSummary(sensorCatalog),
+            });
+
             await InitPopulation();
             if (!active) {
                 return;
             }
 
-            await refreshSolutionsFromBackend();
+            evolutionStepRef.current = 0;
+            await refreshSolutionsFromBackend("InitPopulation");
         };
 
         bootstrap().catch(console.error);
@@ -264,14 +406,37 @@ function App() {
         let active = true;
 
         const loadDecisionData = async () => {
+            const analysisRun = analysisRunRef.current + 1;
+            analysisRunRef.current = analysisRun;
+
+            logAlgorithmPayload("input", `AnalyzeDecision#${analysisRun}`, {
+                request: decisionRequest,
+                config,
+                catalog,
+                population: deferredPopulation,
+            }, {
+                request: decisionRequest,
+                config,
+                catalog: buildCatalogSummary(catalog),
+                population: buildPopulationSummary(deferredPopulation),
+            });
+
             const [analysis, shortlist] = await Promise.all([
                 AnalyzeDecision(decisionRequest),
-                GetOptimalSolutions(10),
+                GetOptimalSolutions(PARETO_SHORTLIST_LIMIT),
             ]);
 
             if (!active) {
                 return;
             }
+
+            logAlgorithmPayload("output", `AnalyzeDecision#${analysisRun}`, {
+                analysis,
+                shortlist,
+            }, {
+                analysis: buildDecisionAnalysisSummary(analysis),
+                paretoShortlist: buildPopulationSummary(shortlist),
+            });
 
             const previousAnalysis = decisionChangedByWeightsRef.current ? lastAnalysisRef.current : null;
             setPreviousDecisionAnalysis(previousAnalysis);
@@ -304,7 +469,26 @@ function App() {
             }
 
             try {
+                const evolutionStep = evolutionStepRef.current + 1;
+                evolutionStepRef.current = evolutionStep;
+
+                logAlgorithmPayload("input", `Evolve#${evolutionStep}`, {
+                    config: configRef.current,
+                    catalog: catalogRef.current,
+                    population: populationRef.current,
+                }, {
+                    config: configRef.current,
+                    catalog: buildCatalogSummary(catalogRef.current),
+                    population: buildPopulationSummary(populationRef.current),
+                });
+
                 const nextGeneration = await Evolve();
+                logAlgorithmPayload("output", `Evolve#${evolutionStep}`, {
+                    population: nextGeneration,
+                }, {
+                    population: buildPopulationSummary(nextGeneration),
+                });
+
                 if (active && isRunning) {
                     decisionChangedByWeightsRef.current = false;
                     setPopulation(nextGeneration);
@@ -364,7 +548,6 @@ function App() {
             || population.find(individual => getIndividualKey(individual) === recommendedSolutionKey)
             || population.find(individual => individual.isPareto)
             || population[0];
-
         displayTarget?.sensors?.forEach(sensor => {
             const colors = SENSOR_COLORS[sensor.type] || SENSOR_COLORS["Standard-B"];
             context.beginPath();
@@ -393,8 +576,21 @@ function App() {
         decisionChangedByWeightsRef.current = false;
 
         try {
+            logAlgorithmPayload("input", "SetConstraints", {
+                previousConfig: config,
+                nextConfig,
+            }, {
+                previousConfig: config,
+                nextConfig,
+            });
+
             await SetConstraints(nextConfig as main.Config);
-            await refreshSolutionsFromBackend();
+            logAlgorithmPayload("output", "SetConstraints", {
+                status: "ok",
+                appliedConfig: nextConfig,
+            });
+            evolutionStepRef.current = 0;
+            await refreshSolutionsFromBackend("SetConstraints");
         } catch (error) {
             console.error(error);
         }
@@ -411,8 +607,23 @@ function App() {
         decisionChangedByWeightsRef.current = false;
 
         try {
+            logAlgorithmPayload("input", "UpdateCatalog", {
+                previousCatalog: catalog,
+                nextCatalog,
+            }, {
+                previousCatalog: buildCatalogSummary(catalog),
+                nextCatalog: buildCatalogSummary(nextCatalog),
+            });
+
             await UpdateCatalog(nextCatalog);
-            await refreshSolutionsFromBackend();
+            logAlgorithmPayload("output", "UpdateCatalog", {
+                status: "ok",
+                appliedCatalog: nextCatalog,
+            }, {
+                appliedCatalog: buildCatalogSummary(nextCatalog),
+            });
+            evolutionStepRef.current = 0;
+            await refreshSolutionsFromBackend("UpdateCatalog");
         } catch (error) {
             console.error(error);
         }
@@ -428,8 +639,23 @@ function App() {
         decisionChangedByWeightsRef.current = false;
 
         try {
+            logAlgorithmPayload("input", "SetConstraints:PriorityZones", {
+                previousConfig: config,
+                nextConfig,
+            }, {
+                previousPriorityZones: config.priorityZones,
+                nextPriorityZones: nextConfig.priorityZones,
+            });
+
             await SetConstraints(nextConfig as main.Config);
-            await refreshSolutionsFromBackend();
+            logAlgorithmPayload("output", "SetConstraints:PriorityZones", {
+                status: "ok",
+                appliedConfig: nextConfig,
+            }, {
+                appliedPriorityZones: nextConfig.priorityZones,
+            });
+            evolutionStepRef.current = 0;
+            await refreshSolutionsFromBackend("SetConstraints:PriorityZones");
         } catch (error) {
             console.error(error);
         }
@@ -472,10 +698,52 @@ function App() {
         ));
     };
 
+    const logSelectedSolution = (
+        source: string,
+        individual: main.Individual,
+        rankedSolution: main.RankedSolution | null = null,
+    ) => {
+        console.log("[selected-solution]", {
+            source,
+            solutionID: rankedSolution?.solutionID ?? null,
+            label: rankedSolution?.label ?? null,
+            key: getIndividualKey(individual),
+            rank: rankedSolution?.rank ?? null,
+            paretoStatus: rankedSolution?.paretoStatus ?? individual.isPareto,
+            metrics: rankedSolution ? {
+                coverage: rankedSolution.metrics.coverage,
+                cost: rankedSolution.metrics.cost,
+                overlap: rankedSolution.metrics.overlap,
+                sensorCount: rankedSolution.metrics.sensorCount,
+                robustness: rankedSolution.metrics.robustness,
+                worstCaseCoverage: rankedSolution.metrics.worstCaseCoverage,
+                averageFailureCoverage: rankedSolution.metrics.averageFailureCoverage,
+            } : {
+                coverage: individual.fitness,
+                cost: individual.totalCost,
+                overlap: null,
+                sensorCount: individual.sensors.length,
+                robustness: null,
+                worstCaseCoverage: null,
+                averageFailureCoverage: null,
+            },
+            topsisScore: rankedSolution?.topsisScore ?? null,
+            weightedSumScore: rankedSolution?.weightedSumScore ?? null,
+            material: formatMaterial(individual.sensors),
+            sensors: individual.sensors,
+            explanation: rankedSolution?.explanation ?? null,
+        });
+    };
+
     const handleSelectRankedSolution = (solutionID: string) => {
-        setSelectedSolutionId(solutionID);
         const solution = getRankedSolutionById(decisionAnalysis, solutionID);
+
+        setSelectedSolutionId(solutionID);
         setSelectedSolutionKey(solution ? getIndividualKey(solution.individual) : null);
+
+        if (solution) {
+            logSelectedSolution("decision-ranking-table", solution.individual, solution);
+        }
     };
 
     const toggleComparison = (solutionID: string) => {
@@ -529,7 +797,7 @@ function App() {
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
-            <aside className="w-[420px] shrink-0 border-r border-slate-800 bg-slate-900/95 p-5 overflow-y-auto custom-scrollbar">
+            <aside className="w-105 shrink-0 border-r border-slate-800 bg-slate-900/95 p-5 overflow-y-auto custom-scrollbar">
                 <div className="space-y-6">
                     <div>
                         <h1 className="text-3xl font-black tracking-tight text-white italic">
@@ -682,10 +950,10 @@ function App() {
                             </div>
                         </div>
 
-                        <div className="mt-4 rounded-[24px] border border-slate-800 bg-[radial-gradient(#1e293b_1px,transparent_1px)] bg-size-[20px_20px] p-4">
+                        <div className="mt-4 rounded-3xl border border-slate-800 bg-[radial-gradient(#1e293b_1px,transparent_1px)] bg-size-[20px_20px] p-4">
                             <div
                                 ref={containerRef}
-                                className="flex min-h-[420px] items-center justify-center overflow-hidden rounded-[20px] border border-slate-800 bg-slate-950"
+                                className="flex min-h-105 items-center justify-center overflow-hidden rounded-[20px] border border-slate-800 bg-slate-950"
                             >
                                 <div
                                     className="relative overflow-hidden rounded-[20px] border-4 border-slate-800 bg-slate-900"
@@ -726,6 +994,7 @@ function App() {
                                 if (recommendedSolution) {
                                     setSelectedSolutionId(recommendedSolution.solutionID);
                                     setSelectedSolutionKey(getIndividualKey(recommendedSolution.individual));
+                                    logSelectedSolution("recommendation-panel", recommendedSolution.individual, recommendedSolution);
                                 }
                             }}
                             onExportCSV={handleExportCSV}
@@ -739,6 +1008,7 @@ function App() {
                             onFocusSolution={(solution) => {
                                 setSelectedSolutionId(solution.solutionID);
                                 setSelectedSolutionKey(getIndividualKey(solution.individual));
+                                logSelectedSolution("comparison-panel", solution.individual, solution);
                             }}
                             onRemoveSolution={(solutionID) => {
                                 setComparisonIds(current => current.filter(id => id !== solutionID));
@@ -777,7 +1047,7 @@ function App() {
                             </div>
                         </div>
 
-                        <div className="mt-4 max-h-[360px] overflow-y-auto custom-scrollbar">
+                        <div className="mt-4 max-h-90 overflow-y-auto custom-scrollbar">
                             <table className="w-full text-left text-sm">
                                 <thead className="sticky top-0 bg-slate-900/95 text-[11px] uppercase tracking-[0.18em] text-slate-500">
                                     <tr>
@@ -790,11 +1060,17 @@ function App() {
                                     {paretoShortlist.map(individual => {
                                         const solutionKey = getIndividualKey(individual);
                                         const isSelected = selectedSolutionKey === solutionKey;
+                                        const rankedSolution = decisionAnalysis?.rankedSolutions.find(
+                                            solution => getIndividualKey(solution.individual) === solutionKey,
+                                        ) || null;
 
                                         return (
                                             <tr
                                                 key={solutionKey}
-                                                onClick={() => setSelectedSolutionKey(solutionKey)}
+                                                onClick={() => {
+                                                    setSelectedSolutionKey(solutionKey);
+                                                    logSelectedSolution("pareto-shortlist", individual, rankedSolution);
+                                                }}
                                                 className={`cursor-pointer transition-colors ${isSelected ? 'bg-emerald-500/10 text-emerald-200' : 'hover:bg-slate-800/60'}`}
                                             >
                                                 <td className="px-3 py-3 font-semibold">{formatPercent(individual.fitness)}</td>
