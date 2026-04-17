@@ -283,7 +283,7 @@ function App() {
     const [sensitivitySummary, setSensitivitySummary] = useState("");
 
     const [selectedSolutionId, setSelectedSolutionId] = useState<string | null>(null);
-    const [selectedSolutionKey, setSelectedSolutionKey] = useState<string | null>(null);
+    const [selectedDisplayIndividual, setSelectedDisplayIndividual] = useState<main.Individual | null>(null);
     const [comparisonIds, setComparisonIds] = useState<string[]>([]);
     const [sortConfig, setSortConfig] = useState<DecisionSortConfig>(DEFAULT_SORT);
 
@@ -297,12 +297,16 @@ function App() {
     const populationRef = useRef<main.Individual[]>([]);
     const configRef = useRef<main.Config>(DEFAULT_CONFIG);
     const catalogRef = useRef<main.Sensor[]>([]);
+    const selectedSolutionIdRef = useRef<string | null>(null);
+    const selectedDisplayIndividualRef = useRef<main.Individual | null>(null);
 
     const deferredPopulation = useDeferredValue(population);
 
     populationRef.current = population;
     configRef.current = config;
     catalogRef.current = catalog;
+    selectedSolutionIdRef.current = selectedSolutionId;
+    selectedDisplayIndividualRef.current = selectedDisplayIndividual;
 
     const refreshSolutionsFromBackend = async (source: string) => {
         logAlgorithmPayload("input", `${source}:RefreshSolutions`, {
@@ -446,10 +450,18 @@ function App() {
             lastAnalysisRef.current = analysis;
             decisionChangedByWeightsRef.current = false;
 
-            if (!analysis.rankedSolutions.some(solution => solution.solutionID === selectedSolutionId)) {
-                const recommended = analysis.rankedSolutions[0];
+            const currentSelectedSolutionID = selectedSolutionIdRef.current;
+            const currentSelectedDisplayIndividual = selectedDisplayIndividualRef.current;
+            const syncedSelectedSolution = currentSelectedSolutionID
+                ? getRankedSolutionById(analysis, currentSelectedSolutionID)
+                : null;
+
+            if (syncedSelectedSolution) {
+                setSelectedDisplayIndividual(syncedSelectedSolution.individual);
+            } else if (currentSelectedSolutionID || !currentSelectedDisplayIndividual) {
+                const recommended = analysis.rankedSolutions[0] || null;
                 setSelectedSolutionId(recommended?.solutionID || null);
-                setSelectedSolutionKey(recommended ? getIndividualKey(recommended.individual) : null);
+                setSelectedDisplayIndividual(recommended?.individual || null);
             }
         };
 
@@ -458,7 +470,7 @@ function App() {
         return () => {
             active = false;
         };
-    }, [deferredPopulation, decisionRequest, selectedSolutionId]);
+    }, [deferredPopulation, decisionRequest]);
 
     useEffect(() => {
         let active = true;
@@ -509,13 +521,21 @@ function App() {
     }, [isRunning]);
 
     const recommendedSolution = decisionAnalysis?.rankedSolutions[0] || null;
+    const selectedSolutionKey = selectedDisplayIndividual
+        ? getIndividualKey(selectedDisplayIndividual)
+        : null;
     const recommendedSolutionKey = recommendedSolution
         ? getIndividualKey(recommendedSolution.individual)
         : null;
+    const displayTarget = selectedDisplayIndividual
+        || recommendedSolution?.individual
+        || population.find(individual => individual.isPareto)
+        || population[0]
+        || null;
 
     useEffect(() => {
         const canvas = canvasRef.current;
-        if (!canvas || population.length === 0) {
+        if (!canvas) {
             return;
         }
 
@@ -544,10 +564,10 @@ function App() {
             );
         });
 
-        const displayTarget = population.find(individual => getIndividualKey(individual) === selectedSolutionKey)
-            || population.find(individual => getIndividualKey(individual) === recommendedSolutionKey)
-            || population.find(individual => individual.isPareto)
-            || population[0];
+        if (!displayTarget) {
+            return;
+        }
+
         displayTarget?.sensors?.forEach(sensor => {
             const colors = SENSOR_COLORS[sensor.type] || SENSOR_COLORS["Standard-B"];
             context.beginPath();
@@ -561,7 +581,7 @@ function App() {
             context.fillStyle = colors.dot;
             context.fill();
         });
-    }, [config, dynamicScale, population, recommendedSolutionKey, selectedSolutionKey]);
+    }, [config, dynamicScale, displayTarget]);
 
     const handleConfigChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
         const { name, value } = event.target;
@@ -572,7 +592,7 @@ function App() {
 
         setConfig(nextConfig);
         setSelectedSolutionId(null);
-        setSelectedSolutionKey(null);
+        setSelectedDisplayIndividual(null);
         decisionChangedByWeightsRef.current = false;
 
         try {
@@ -603,7 +623,7 @@ function App() {
 
         setCatalog(nextCatalog);
         setSelectedSolutionId(null);
-        setSelectedSolutionKey(null);
+        setSelectedDisplayIndividual(null);
         decisionChangedByWeightsRef.current = false;
 
         try {
@@ -698,6 +718,16 @@ function App() {
         ));
     };
 
+    const selectDisplaySolution = (
+        individual: main.Individual,
+        source: string,
+        rankedSolution: main.RankedSolution | null = null,
+    ) => {
+        setSelectedSolutionId(rankedSolution?.solutionID || null);
+        setSelectedDisplayIndividual(individual);
+        logSelectedSolution(source, individual, rankedSolution);
+    };
+
     const logSelectedSolution = (
         source: string,
         individual: main.Individual,
@@ -737,12 +767,8 @@ function App() {
 
     const handleSelectRankedSolution = (solutionID: string) => {
         const solution = getRankedSolutionById(decisionAnalysis, solutionID);
-
-        setSelectedSolutionId(solutionID);
-        setSelectedSolutionKey(solution ? getIndividualKey(solution.individual) : null);
-
         if (solution) {
-            logSelectedSolution("decision-ranking-table", solution.individual, solution);
+            selectDisplaySolution(solution.individual, "decision-ranking-table", solution);
         }
     };
 
@@ -789,11 +815,6 @@ function App() {
         decisionAnalysis,
         decisionAnalysis?.weightedSumRecommendedSolutionID || "",
     );
-
-    const displayTarget = population.find(individual => getIndividualKey(individual) === selectedSolutionKey)
-        || population.find(individual => getIndividualKey(individual) === recommendedSolutionKey)
-        || population.find(individual => individual.isPareto)
-        || population[0];
 
     return (
         <div className="flex h-screen bg-slate-950 text-slate-100 overflow-hidden">
@@ -992,9 +1013,7 @@ function App() {
                             baselineRecommended={baselineRecommended}
                             onFocusRecommended={() => {
                                 if (recommendedSolution) {
-                                    setSelectedSolutionId(recommendedSolution.solutionID);
-                                    setSelectedSolutionKey(getIndividualKey(recommendedSolution.individual));
-                                    logSelectedSolution("recommendation-panel", recommendedSolution.individual, recommendedSolution);
+                                    selectDisplaySolution(recommendedSolution.individual, "recommendation-panel", recommendedSolution);
                                 }
                             }}
                             onExportCSV={handleExportCSV}
@@ -1006,9 +1025,7 @@ function App() {
                         <ComparisonPanel
                             solutions={comparisonSolutions}
                             onFocusSolution={(solution) => {
-                                setSelectedSolutionId(solution.solutionID);
-                                setSelectedSolutionKey(getIndividualKey(solution.individual));
-                                logSelectedSolution("comparison-panel", solution.individual, solution);
+                                selectDisplaySolution(solution.individual, "comparison-panel", solution);
                             }}
                             onRemoveSolution={(solutionID) => {
                                 setComparisonIds(current => current.filter(id => id !== solutionID));
@@ -1068,8 +1085,7 @@ function App() {
                                             <tr
                                                 key={solutionKey}
                                                 onClick={() => {
-                                                    setSelectedSolutionKey(solutionKey);
-                                                    logSelectedSolution("pareto-shortlist", individual, rankedSolution);
+                                                    selectDisplaySolution(individual, "pareto-shortlist", rankedSolution);
                                                 }}
                                                 className={`cursor-pointer transition-colors ${isSelected ? 'bg-emerald-500/10 text-emerald-200' : 'hover:bg-slate-800/60'}`}
                                             >

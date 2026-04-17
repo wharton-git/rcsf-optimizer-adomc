@@ -19,8 +19,17 @@ export const getMaterialSignature = (sensors: main.Sensor[]) => Object.entries(f
     .map(([type, count]) => `${type}:${count}`)
     .join('|');
 
+const getSensorSignature = (sensor: main.Sensor) => (
+    `${sensor.type}:${sensor.x.toFixed(3)}:${sensor.y.toFixed(3)}:${sensor.range.toFixed(3)}:${Math.round(sensor.cost)}`
+);
+
+export const getSensorLayoutSignature = (sensors: main.Sensor[]) => [...sensors]
+    .map(getSensorSignature)
+    .sort((left, right) => left.localeCompare(right))
+    .join('|');
+
 export const getIndividualKey = (individual: main.Individual) =>
-    `${Math.round(individual.totalCost)}-${individual.fitness.toFixed(3)}-${getMaterialSignature(individual.sensors)}`;
+    `${Math.round(individual.totalCost)}-${individual.fitness.toFixed(3)}-${getMaterialSignature(individual.sensors)}-${getSensorLayoutSignature(individual.sensors)}`;
 
 export const formatCost = (value: number) => `${Math.round(value).toLocaleString()} Ar`;
 export const formatPercent = (value: number) => `${value.toFixed(1)}%`;
